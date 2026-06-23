@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""ccsessions — list Claude Code sessions (project, tldr) and resume one.
+
+Usage:
+  ccsessions            # 30 most-recent sessions, pick a number to resume
+  ccsessions -n 60      # show more
+  ccsessions -a         # show all
+  ccsessions foo        # filter by project/tldr substring
+"""
+import os, sys, json, glob, subprocess, time
+
+PROJECTS = os.path.expanduser("~/.claude/projects")
+
+def first(d, *keys):
+    for k in keys:
+        if k in d and d[k]:
+            return d[k]
+    return None
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):  # blocks
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                return b.get("text", "")
+        return " ".join(str(b.get("text","")) for b in content if isinstance(b, dict))
+    return ""
+
+def scan(path):
+    """Return (cwd, tldr) reading as few lines as needed."""
+    cwd, summary, first_user = None, None, None
+    try:
+        with open(path, "r", errors="ignore") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                cwd = cwd or d.get("cwd")
+                if d.get("type") == "summary" and not summary:
+                    summary = d.get("summary")
+                if first_user is None and d.get("type") == "user":
+                    msg = d.get("message") or {}
+                    if msg.get("role") == "user":
+                        t = text_of(msg.get("content")).strip()
+                        noise = (t.startswith("<") or
+                                 t.startswith("Base directory for this skill") or
+                                 t.startswith("Caveat:") or "<command-" in t[:40])
+                        if t and not noise:
+                            first_user = t
+                if cwd and summary:
+                    break
+    except Exception:
+        pass
+    tldr = summary or first_user or "(no preview)"
+    return cwd, " ".join(tldr.split())
+
+def running_cwds():
+    try:
+        pids = subprocess.check_output(["pgrep", "-x", "claude"], text=True).split()
+    except Exception:
+        return set()
+    out = set()
+    for p in pids:
+        try:
+            r = subprocess.check_output(["lsof","-a","-p",p,"-d","cwd","-Fn"], text=True, stderr=subprocess.DEVNULL)
+            for l in r.splitlines():
+                if l.startswith("n"):
+                    out.add(l[1:])
+        except Exception:
+            pass
+    return out
+
+def main():
+    args = sys.argv[1:]
+    limit, filt = 30, None
+    if "-a" in args: limit = 10**9; args.remove("-a")
+    if "-n" in args:
+        i = args.index("-n"); limit = int(args[i+1]); del args[i:i+2]
+    if args: filt = args[0].lower()
+
+    files = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
+    files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+
+    live = running_cwds()
+    rows = []
+    for f in files:
+        cwd, tldr = scan(f)
+        proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
+        if filt and filt not in proj.lower() and filt not in tldr.lower():
+            continue
+        rows.append({
+            "id": os.path.basename(f)[:-6], "cwd": cwd, "proj": proj, "tldr": tldr,
+            "mtime": os.path.getmtime(f), "live": cwd in live,
+        })
+        if len(rows) >= limit:
+            break
+
+    if not rows:
+        print("No sessions found."); return
+
+    now = time.time()
+    def ago(t):
+        s = now - t
+        if s < 3600: return f"{int(s//60)}m"
+        if s < 86400: return f"{int(s//3600)}h"
+        return f"{int(s//86400)}d"
+
+    print()
+    for i, r in enumerate(rows, 1):
+        dot = "\033[32m●\033[0m" if r["live"] else " "
+        proj = (r["proj"] or "?")[:22]
+        tldr = r["tldr"][:70]
+        print(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  {tldr}")
+    print(f"\n  \033[32m●\033[0m = running   ({len(rows)} shown)")
+
+    try:
+        pick = input("\nResume # (Enter to quit): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(); return
+    if not pick:
+        return
+    try:
+        r = rows[int(pick) - 1]
+    except (ValueError, IndexError):
+        print("invalid"); return
+    if not r["cwd"] or not os.path.isdir(r["cwd"]):
+        print(f"cwd missing: {r['cwd']}"); return
+    os.chdir(r["cwd"])
+    os.execvp("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"])
+
+if __name__ == "__main__":
+    main()
