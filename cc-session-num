@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+import os, glob
+sid = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+files = sorted(glob.glob(os.path.expanduser('~/.claude/projects/*/*.jsonl')), key=os.path.getmtime, reverse=True)
+for i, f in enumerate(files[:60], 1):
+    if sid in f:
+        print(f'#{i}')
+        break

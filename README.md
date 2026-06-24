@@ -58,6 +58,32 @@ Reads `~/.claude/projects/*/*.jsonl`, sorts by modification time, pulls `cwd` an
 from each, and cross-references running `claude` PIDs (`pgrep` + `lsof`) to flag live
 sessions. Selecting one `exec`s `claude --resume`.
 
+## ccstatusline integration
+
+Show the current session number (`#1`, `#2`, …) in your [ccstatusline](https://github.com/sirmalloc/ccstatusline) statusbar.
+
+Save this as `~/.local/bin/cc-session-num`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/treebird7/ccsessions/main/cc-session-num \
+  -o ~/.local/bin/cc-session-num && chmod +x ~/.local/bin/cc-session-num
+```
+
+Or manually:
+
+```python
+#!/usr/bin/env python3
+import os, glob
+sid = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+files = sorted(glob.glob(os.path.expanduser('~/.claude/projects/*/*.jsonl')), key=os.path.getmtime, reverse=True)
+for i, f in enumerate(files[:60], 1):
+    if sid in f:
+        print(f'#{i}')
+        break
+```
+
+Then in `ccstatusline --tui`, add a **Custom Command** widget with command `cc-session-num`.
+
 ## License
 
 MIT
