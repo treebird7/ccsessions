@@ -2,8 +2,8 @@
 """ccsessions — list Claude Code sessions (project, what it's doing) and resume one.
 
 Usage:
-  ccsessions            # 30 most-recent sessions, pick a number to resume
-  ccsessions -n 60      # show more
+  ccsessions            # 100 most-recent sessions (set CCSESSIONS_LIMIT to change)
+  ccsessions -n 200     # show a custom count
   ccsessions -a         # show all
   ccsessions foo        # filter by project/tldr substring
   ccsessions -g         # group by project (cockpit view)
@@ -205,7 +205,7 @@ def main():
     args = sys.argv[1:]
     if args and args[0] == "freeze": return cmd_freeze(args[1:])
     if args and args[0] == "thaw":   return cmd_thaw(args[1:])
-    limit, filt = 30, None
+    limit, filt = int(os.environ.get("CCSESSIONS_LIMIT", "100")), None
     as_json = "--json" in args; args = [a for a in args if a != "--json"]
     # Invoked as `tbe` (TreeBirdsEye) → grouped cockpit by default.
     grouped = "-g" in args or os.path.basename(sys.argv[0]).startswith("tbe")
