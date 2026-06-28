@@ -8,10 +8,26 @@ Usage:
   ccsessions foo        # filter by project/tldr substring
   ccsessions -g         # group by project (cockpit view)
   ccsessions --json     # machine-readable dump (for birdsan orchestration)
+  tbe freeze [N] [note] # pin a session for later (no N = current session)
+  tbe thaw <#|id>       # unpin
 """
 import os, sys, json, glob, subprocess, time
 
 PROJECTS = os.path.expanduser("~/.claude/projects")
+FROZEN = os.path.expanduser("~/.claude/ccsessions-frozen.json")  # {id: {note, at, proj}}
+LAST = os.path.expanduser("~/.claude/ccsessions-last.json")      # [{n,id,proj,cwd}] of last render
+
+def load_json(p, default):
+    try:
+        with open(p) as fh: return json.load(fh)
+    except Exception:
+        return default
+
+def save_json(p, data):
+    try:
+        with open(p, "w") as fh: json.dump(data, fh)
+    except Exception:
+        pass
 
 def first(d, *keys):
     for k in keys:
@@ -99,14 +115,77 @@ def running_cwds():
             pass
     return out
 
-def print_grouped(rows, ago):
+def find_file(sid):
+    g = glob.glob(os.path.join(PROJECTS, "*", f"*{sid}*.jsonl"))
+    return g[0] if g else None
+
+def row_for(sid, live):
+    """Build a row for a session id (may be older than the scan window)."""
+    f = find_file(sid)
+    if not f:
+        return None
+    cwd, tldr, doing = scan(f)
+    proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
+    return {"id": os.path.basename(f)[:-6], "cwd": cwd, "proj": proj, "tldr": tldr,
+            "doing": doing, "mtime": os.path.getmtime(f), "live": cwd in live}
+
+def cmd_freeze(rest):
+    """tbe freeze [N] [note...]  — pin a session for later with an optional note.
+    N resolves against the last listing; with no N, freezes the CURRENT session."""
+    frozen = load_json(FROZEN, {})
+    sid, proj = None, None
+    if rest and rest[0].isdigit():
+        n = int(rest[0]); rest = rest[1:]
+        row = next((r for r in load_json(LAST, []) if r["n"] == n), None)
+        if not row:
+            print(f"no #{n} in the last listing — run `tbe` first, then freeze."); return
+        sid, proj = row["id"], row.get("proj")
+    else:
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        if not sid:
+            print("not inside a session — use: tbe freeze <#> [note]"); return
+    frozen[sid] = {"note": " ".join(rest), "at": time.time(), "proj": proj}
+    save_json(FROZEN, frozen)
+    print(f"📌 frozen {sid[:8]} — {frozen[sid]['note'] or '(no note)'}")
+
+def cmd_thaw(rest):
+    frozen = load_json(FROZEN, {})
+    if not rest:
+        print("usage: tbe thaw <#|id>"); return
+    key = rest[0]
+    sid = None
+    if key.isdigit():
+        row = next((r for r in load_json(LAST, []) if r["n"] == int(key)), None)
+        sid = row["id"] if row else None
+    else:
+        sid = next((k for k in frozen if k.startswith(key)), key)
+    if sid in frozen:
+        del frozen[sid]; save_json(FROZEN, frozen); print(f"🫧 thawed {sid[:8]}")
+    else:
+        print(f"not frozen: {key}")
+
+def print_pinned(rows, ago, frozen, start=0):
+    """Render the 📌 frozen section at the very top. Returns rows in print order."""
+    if not rows:
+        return []
+    print(f"\n\033[1;35m📌 frozen\033[0m \033[2m({len(rows)})\033[0m")
+    out, i = [], start
+    for r in rows:
+        i += 1; out.append(r)
+        dot = "\033[32m●\033[0m" if r["live"] else " "
+        note = frozen.get(r["id"], {}).get("note") or (r["doing"] or r["tldr"])
+        print(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  \033[35m{r['proj'][:14]:<14}\033[0m {note[:50]}")
+    print()
+    return out
+
+def print_grouped(rows, ago, start=0):
     """Cockpit view: sessions bucketed by project, freshest project first.
     Returns rows in printed order so resume-by-number still lines up."""
     groups = {}
     for r in rows:
         groups.setdefault(r["proj"] or "?", []).append(r)
     order = sorted(groups, key=lambda p: max(x["mtime"] for x in groups[p]), reverse=True)
-    out, i = [], 0
+    out, i = [], start
     print()
     for proj in order:
         g = sorted(groups[proj], key=lambda x: x["mtime"], reverse=True)
@@ -124,6 +203,8 @@ def print_grouped(rows, ago):
 
 def main():
     args = sys.argv[1:]
+    if args and args[0] == "freeze": return cmd_freeze(args[1:])
+    if args and args[0] == "thaw":   return cmd_thaw(args[1:])
     limit, filt = 30, None
     as_json = "--json" in args; args = [a for a in args if a != "--json"]
     # Invoked as `tbe` (TreeBirdsEye) → grouped cockpit by default.
@@ -162,20 +243,39 @@ def main():
         if s < 86400: return f"{int(s//3600)}h"
         return f"{int(s//86400)}d"
 
-    if as_json:
-        for r in rows: r["ago"] = ago(r["mtime"])
-        print(json.dumps(rows, indent=2)); return
+    # Frozen sessions are pinned to the top, always shown even if older than the
+    # scan window — fetch any that the scan missed, and pull pinned out of the body.
+    frozen = load_json(FROZEN, {})
+    pinned_ids = [s for s in rows if s["id"] in frozen]
+    have = {r["id"] for r in pinned_ids}
+    for sid in frozen:
+        if sid not in have:
+            r = row_for(sid, live)
+            if r: pinned_ids.append(r)
+    pinned_ids.sort(key=lambda r: frozen.get(r["id"], {}).get("at", 0), reverse=True)
+    rows = [r for r in rows if r["id"] not in frozen]
 
+    if as_json:
+        for r in rows + pinned_ids:
+            r["ago"] = ago(r["mtime"]); r["frozen"] = r["id"] in frozen
+        print(json.dumps(pinned_ids + rows, indent=2)); return
+
+    pinned = print_pinned(pinned_ids, ago, frozen)
     if grouped:
-        rows = print_grouped(rows, ago)
+        body = print_grouped(rows, ago, start=len(pinned))
     else:
+        body = []
         print()
-        for i, r in enumerate(rows, 1):
+        for i, r in enumerate(rows, len(pinned) + 1):
+            body.append(r)
             dot = "\033[32m●\033[0m" if r["live"] else " "
             proj = (r["proj"] or "?")[:22]
             line = (r["doing"] or r["tldr"])[:70]
             print(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  {line}")
         print(f"\n  \033[32m●\033[0m = running   ({len(rows)} shown)")
+    rows = pinned + body
+    save_json(LAST, [{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"]}
+                     for i, r in enumerate(rows, 1)])
 
     try:
         pick = input("\nResume # (Enter to quit): ").strip()
