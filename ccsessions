@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""ccsessions — list Claude Code sessions (project, tldr) and resume one.
+"""ccsessions — list Claude Code sessions (project, what it's doing) and resume one.
 
 Usage:
   ccsessions            # 30 most-recent sessions, pick a number to resume
   ccsessions -n 60      # show more
   ccsessions -a         # show all
   ccsessions foo        # filter by project/tldr substring
+  ccsessions -g         # group by project (cockpit view)
+  ccsessions --json     # machine-readable dump (for birdsan orchestration)
 """
 import os, sys, json, glob, subprocess, time
 
@@ -27,8 +29,13 @@ def text_of(content):
         return " ".join(str(b.get("text","")) for b in content if isinstance(b, dict))
     return ""
 
+def noisy(t):
+    return (t.startswith("<") or
+            t.startswith("Base directory for this skill") or
+            t.startswith("Caveat:") or "<command-" in t[:40])
+
 def scan(path):
-    """Return (cwd, tldr) reading as few lines as needed."""
+    """Return (cwd, tldr, doing) — tldr is the gist, doing is the LATEST activity."""
     cwd, summary, first_user = None, None, None
     try:
         with open(path, "r", errors="ignore") as fh:
@@ -44,17 +51,37 @@ def scan(path):
                     msg = d.get("message") or {}
                     if msg.get("role") == "user":
                         t = text_of(msg.get("content")).strip()
-                        noise = (t.startswith("<") or
-                                 t.startswith("Base directory for this skill") or
-                                 t.startswith("Caveat:") or "<command-" in t[:40])
-                        if t and not noise:
+                        if t and not noisy(t):
                             first_user = t
                 if cwd and summary:
                     break
     except Exception:
         pass
     tldr = summary or first_user or "(no preview)"
-    return cwd, " ".join(tldr.split())
+    return cwd, " ".join(tldr.split()), last_doing(path)
+
+def last_doing(path, nbytes=65536):
+    """Tail the file for the most recent meaningful user/assistant text — the
+    freshest 'what it's doing now', truer than a stale hive signal.
+    ponytail: 64KB tail, not a full read; bump if last turns are huge."""
+    try:
+        sz = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if sz > nbytes:
+                fh.seek(-nbytes, os.SEEK_END); fh.readline()
+            lines = fh.read().decode("utf-8", "ignore").splitlines()
+    except Exception:
+        return ""
+    for line in reversed(lines):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("type") in ("user", "assistant"):
+            t = text_of((d.get("message") or {}).get("content")).strip()
+            if t and not noisy(t):
+                return " ".join(t.split())[:200]
+    return ""
 
 def running_cwds():
     try:
@@ -72,9 +99,37 @@ def running_cwds():
             pass
     return out
 
+def print_grouped(rows, ago):
+    """Cockpit view: sessions bucketed by project, freshest project first.
+    Returns rows in printed order so resume-by-number still lines up."""
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["proj"] or "?", []).append(r)
+    order = sorted(groups, key=lambda p: max(x["mtime"] for x in groups[p]), reverse=True)
+    out, i = [], 0
+    print()
+    for proj in order:
+        g = sorted(groups[proj], key=lambda x: x["mtime"], reverse=True)
+        n_live = sum(1 for x in g if x["live"])
+        flag = f" \033[32m{n_live} live\033[0m" if n_live else ""
+        print(f"\033[1;36m{proj}\033[0m  \033[2m({len(g)}){flag}\033[0m")
+        for r in g:
+            i += 1; out.append(r)
+            dot = "\033[32m●\033[0m" if r["live"] else " "
+            line = (r["doing"] or r["tldr"])[:64]
+            print(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  {line}")
+        print()
+    print(f"  \033[32m●\033[0m = running   ({len(out)} sessions, {len(order)} projects)")
+    return out
+
 def main():
     args = sys.argv[1:]
     limit, filt = 30, None
+    as_json = "--json" in args; args = [a for a in args if a != "--json"]
+    # Invoked as `tbe` (TreeBirdsEye) → grouped cockpit by default.
+    grouped = "-g" in args or os.path.basename(sys.argv[0]).startswith("tbe")
+    args = [a for a in args if a != "-g"]
+    if as_json: limit = 10**9
     if "-a" in args: limit = 10**9; args.remove("-a")
     if "-n" in args:
         i = args.index("-n"); limit = int(args[i+1]); del args[i:i+2]
@@ -86,19 +141,19 @@ def main():
     live = running_cwds()
     rows = []
     for f in files:
-        cwd, tldr = scan(f)
+        cwd, tldr, doing = scan(f)
         proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
-        if filt and filt not in proj.lower() and filt not in tldr.lower():
+        if filt and filt not in proj.lower() and filt not in tldr.lower() and filt not in doing.lower():
             continue
         rows.append({
             "id": os.path.basename(f)[:-6], "cwd": cwd, "proj": proj, "tldr": tldr,
-            "mtime": os.path.getmtime(f), "live": cwd in live,
+            "doing": doing, "mtime": os.path.getmtime(f), "live": cwd in live,
         })
         if len(rows) >= limit:
             break
 
     if not rows:
-        print("No sessions found."); return
+        print("No sessions found." if not as_json else "[]"); return
 
     now = time.time()
     def ago(t):
@@ -107,13 +162,20 @@ def main():
         if s < 86400: return f"{int(s//3600)}h"
         return f"{int(s//86400)}d"
 
-    print()
-    for i, r in enumerate(rows, 1):
-        dot = "\033[32m●\033[0m" if r["live"] else " "
-        proj = (r["proj"] or "?")[:22]
-        tldr = r["tldr"][:70]
-        print(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  {tldr}")
-    print(f"\n  \033[32m●\033[0m = running   ({len(rows)} shown)")
+    if as_json:
+        for r in rows: r["ago"] = ago(r["mtime"])
+        print(json.dumps(rows, indent=2)); return
+
+    if grouped:
+        rows = print_grouped(rows, ago)
+    else:
+        print()
+        for i, r in enumerate(rows, 1):
+            dot = "\033[32m●\033[0m" if r["live"] else " "
+            proj = (r["proj"] or "?")[:22]
+            line = (r["doing"] or r["tldr"])[:70]
+            print(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  {line}")
+        print(f"\n  \033[32m●\033[0m = running   ({len(rows)} shown)")
 
     try:
         pick = input("\nResume # (Enter to quit): ").strip()
