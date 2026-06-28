@@ -11,7 +11,8 @@ Usage:
   tbe freeze [N] [note] # pin a session for later (no N = current session)
   tbe thaw <#|id>       # unpin
 """
-import os, sys, json, glob, subprocess, time
+import os, sys, json, glob, subprocess, time, re
+from collections import Counter
 
 PROJECTS = os.path.expanduser("~/.claude/projects")
 FROZEN = os.path.expanduser("~/.claude/ccsessions-frozen.json")  # {id: {note, at, proj}}
@@ -99,21 +100,50 @@ def last_doing(path, nbytes=65536):
                 return " ".join(t.split())[:200]
     return ""
 
-def running_cwds():
+def _proc_cwd(pid):
+    try:
+        r = subprocess.check_output(["lsof","-a","-p",pid,"-d","cwd","-Fn"], text=True, stderr=subprocess.DEVNULL)
+        return next((l[1:] for l in r.splitlines() if l.startswith("n")), None)
+    except Exception:
+        return None
+
+def running_sessions():
+    """Set of session ids that are ACTUALLY running — one per live `claude` process.
+    `--resume <id>` in argv pins the id exactly; a fresh start (no --resume) writes the
+    newest jsonl in its cwd's project dir, so K procs in a cwd claim the K newest unclaimed
+    sessions there. Far truer than the old per-cwd flag, which lit up every session that
+    ever ran in a live folder (closed, ancient, all green).
+    ponytail: argv + newest-mtime heuristic; exact for --resume, newest-jsonl for fresh."""
     try:
         pids = subprocess.check_output(["pgrep", "-x", "claude"], text=True).split()
     except Exception:
         return set()
-    out = set()
+    live, fresh_cwds = set(), []
     for p in pids:
         try:
-            r = subprocess.check_output(["lsof","-a","-p",p,"-d","cwd","-Fn"], text=True, stderr=subprocess.DEVNULL)
-            for l in r.splitlines():
-                if l.startswith("n"):
-                    out.add(l[1:])
+            args = subprocess.check_output(["ps","-o","args=","-p",p], text=True)
         except Exception:
-            pass
-    return out
+            args = ""
+        m = re.search(r"--resume\s+([0-9a-fA-F-]{36})", args)
+        if m:
+            live.add(m.group(1)); continue
+        cwd = _proc_cwd(p)
+        if cwd:
+            fresh_cwds.append(cwd)
+    # fresh starts: each takes the newest not-yet-claimed jsonl in its cwd's project dir.
+    # A fresh `claude` is writing RIGHT NOW, so only recently-touched files qualify — this
+    # stops a surplus proc (e.g. a child/zombie) from lighting up an ancient session.
+    cutoff = time.time() - 2 * 3600
+    for cwd, k in Counter(fresh_cwds).items():
+        pdir = os.path.join(PROJECTS, cwd.replace("/", "-"))
+        js = sorted(glob.glob(os.path.join(pdir, "*.jsonl")), key=os.path.getmtime, reverse=True)
+        for f in js:
+            if k <= 0: break
+            if os.path.getmtime(f) < cutoff: break
+            sid = os.path.basename(f)[:-6]
+            if sid not in live:
+                live.add(sid); k -= 1
+    return live
 
 def find_file(sid):
     g = glob.glob(os.path.join(PROJECTS, "*", f"*{sid}*.jsonl"))
@@ -126,8 +156,9 @@ def row_for(sid, live):
         return None
     cwd, tldr, doing = scan(f)
     proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
-    return {"id": os.path.basename(f)[:-6], "cwd": cwd, "proj": proj, "tldr": tldr,
-            "doing": doing, "mtime": os.path.getmtime(f), "live": cwd in live}
+    sid = os.path.basename(f)[:-6]
+    return {"id": sid, "cwd": cwd, "proj": proj, "tldr": tldr,
+            "doing": doing, "mtime": os.path.getmtime(f), "live": sid in live}
 
 def cmd_freeze(rest):
     """tbe freeze [N] [note...]  — pin a session for later with an optional note.
@@ -201,8 +232,17 @@ def print_grouped(rows, ago, start=0):
     print(f"  \033[32m●\033[0m = running   ({len(out)} sessions, {len(order)} projects)")
     return out
 
+def _selftest():
+    # the two load-bearing bits of running_sessions(): --resume id capture + cwd→projdir encoding
+    rid = "246effba-e0d4-4fa1-be5e-7411e403eadb"
+    m = re.search(r"--resume\s+([0-9a-fA-F-]{36})", f"claude --resume {rid} --dangerously-skip-permissions")
+    assert m and m.group(1) == rid, "resume regex"
+    assert "/Users/freedbird/Dev/Envoak".replace("/", "-") == "-Users-freedbird-Dev-Envoak", "projdir encoding"
+    print("selftest ok"); return
+
 def main():
     args = sys.argv[1:]
+    if args and args[0] == "--selftest": return _selftest()
     if args and args[0] == "freeze": return cmd_freeze(args[1:])
     if args and args[0] == "thaw":   return cmd_thaw(args[1:])
     limit, filt = int(os.environ.get("CCSESSIONS_LIMIT", "100")), None
@@ -219,16 +259,17 @@ def main():
     files = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
     files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
 
-    live = running_cwds()
+    live = running_sessions()
     rows = []
     for f in files:
         cwd, tldr, doing = scan(f)
         proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
         if filt and filt not in proj.lower() and filt not in tldr.lower() and filt not in doing.lower():
             continue
+        sid = os.path.basename(f)[:-6]
         rows.append({
-            "id": os.path.basename(f)[:-6], "cwd": cwd, "proj": proj, "tldr": tldr,
-            "doing": doing, "mtime": os.path.getmtime(f), "live": cwd in live,
+            "id": sid, "cwd": cwd, "proj": proj, "tldr": tldr,
+            "doing": doing, "mtime": os.path.getmtime(f), "live": sid in live,
         })
         if len(rows) >= limit:
             break
