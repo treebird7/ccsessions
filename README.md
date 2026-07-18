@@ -33,6 +33,16 @@ curl -fsSL https://raw.githubusercontent.com/treebird7/ccsessions/main/ccsession
 
 Make sure `~/.local/bin` is on your `PATH`.
 
+### TreeBirdsEye (`tbe`)
+
+The repo also ships a `tbe` symlink to the same script. Invoking it as `tbe` instead of
+`ccsessions` switches the default view to the per-project cockpit (grouped, freshest first)
+and enables `tbe freeze`/`tbe thaw`. Symlink it alongside `ccsessions`:
+
+```bash
+ln -s ~/.local/bin/ccsessions ~/.local/bin/tbe
+```
+
 ## Usage
 
 ```bash
