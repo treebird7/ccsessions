@@ -92,7 +92,8 @@ if '--title' in sys.argv[1:]:
     set_title()
 else:
     print(render(with_repo=False))
-    # As a statusline widget this runs on every render, which is a free ride for
-    # the window title — no separate hook to install. NO_TITLE=1 opts out.
-    if os.environ.get('CC_AGENT_SESSION_NO_TITLE') != '1':
+    # NOT setting the title here by default: a widget write to /dev/tty lands in the
+    # middle of the TUI's own frame and shreds multi-byte glyphs into "�". Opt in with
+    # CC_AGENT_SESSION_TITLE=1 if your terminal tolerates it; the hook is the safe path.
+    if os.environ.get('CC_AGENT_SESSION_TITLE') == '1':
         set_title()

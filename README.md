@@ -121,14 +121,19 @@ As a side effect the widget also sets the **terminal window title** to
 sherlock-m5 · Toak · Jul31 13:36
 ```
 
-The widget already runs on every statusline render, so this is free — nothing to install and
-no hook to register. The escape goes straight to `/dev/tty`, because both widget and hook
-stdout belong to Claude Code, not to your terminal.
+The escape has to go straight to `/dev/tty`, because both widget and hook stdout belong to
+Claude Code, not to your terminal. **Set it from a hook, not from the widget** — a widget
+writes on every statusline render, which lands in the middle of the TUI's own frame and
+shreds multi-byte glyphs into `�`. A hook fires between turns instead:
 
-- `CC_AGENT_SESSION_NO_TITLE=1` — keep the statusline segment, drop the title.
-- `cc-agent-session --title` — title only, no stdout. Use it from a `SessionStart` /
-  `UserPromptSubmit` hook if you want the title *without* the statusline widget, or if
-  Claude Code's own title overwrites it between renders.
+```json
+{ "hooks": { "SessionStart": [
+    { "hooks": [{ "type": "command", "command": "~/.local/bin/cc-agent-session --title" }] } ] } }
+```
+
+- `cc-agent-session --title` — title only, nothing on stdout. The hook form above.
+- `CC_AGENT_SESSION_TITLE=1` — also set the title from the statusline widget. Off by default
+  for the frame-corruption reason above; fine in terminals that tolerate it.
 - `CC_TITLE_TTY=/tmp/x` — write the escape to a file instead, to see what it would set.
 
 #### Where the values come from
