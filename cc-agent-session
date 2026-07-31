@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """ccstatusline widget: agent label (envoak/dawn) + session start time.
 
+  cc-agent-session            statusline segment: "<agent> · <start>"
+  cc-agent-session --title    same + repo, written to /dev/tty as the terminal
+                              window title (for a SessionStart/UserPromptSubmit hook)
+
 Context % is already covered by ccstatusline's built-in context widgets.
 """
 import glob
 import json
 import os
 import re
+import sys
 from datetime import datetime
 
 HOME = os.path.expanduser('~')
@@ -30,9 +35,12 @@ def started():
     hits = glob.glob(f'{HOME}/.claude/projects/*/{sid}.jsonl') if sid else []
     if not hits:
         return None
-    with open(hits[0]) as f:
+    with open(hits[0], errors='ignore') as f:
         for line in f:
-            ts = json.loads(line).get('timestamp')
+            try:
+                ts = json.loads(line).get('timestamp')
+            except Exception:
+                continue
             if ts:
                 # stored UTC ("...Z"); show local
                 utc = datetime.fromisoformat(ts.replace('Z', '+00:00'))
@@ -49,9 +57,42 @@ def pinned():
         return False
 
 
-parts = [agent()]
-t = started()
-if t:
-    parts.append(t)
-line = ' · '.join(parts)
-print(f'📌 {line}' if pinned() else line)
+def repo():
+    """Nearest enclosing git repo name, else the cwd's name."""
+    d = os.getcwd()
+    while True:
+        if os.path.exists(os.path.join(d, '.git')):
+            return os.path.basename(d)
+        parent = os.path.dirname(d)
+        if parent == d:
+            return os.path.basename(os.getcwd())
+        d = parent
+
+
+def render(with_repo):
+    parts = [agent()] + ([repo()] if with_repo else [])
+    t = started()
+    if t:
+        parts.append(t)
+    line = ' · '.join(parts)
+    return f'📌 {line}' if pinned() else line
+
+
+def set_title():
+    """Hook/widget stdout goes to Claude Code, so talk to the terminal directly.
+    CC_TITLE_TTY redirects it to a file — handy to see what would be written."""
+    try:
+        with open(os.environ.get('CC_TITLE_TTY', '/dev/tty'), 'w') as tty:
+            tty.write(f'\033]0;{render(with_repo=True)}\007')
+    except Exception:
+        pass
+
+
+if '--title' in sys.argv[1:]:
+    set_title()
+else:
+    print(render(with_repo=False))
+    # As a statusline widget this runs on every render, which is a free ride for
+    # the window title — no separate hook to install. NO_TITLE=1 opts out.
+    if os.environ.get('CC_AGENT_SESSION_NO_TITLE') != '1':
+        set_title()

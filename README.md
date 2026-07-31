@@ -110,7 +110,13 @@ curl -fsSL https://raw.githubusercontent.com/treebird7/ccsessions/main/cc-agent-
   -o ~/.local/bin/cc-agent-session && chmod +x ~/.local/bin/cc-agent-session
 ```
 
-Add it as another **Custom Command** widget. The start time is the first timestamp in the
+Add it as another **Custom Command** widget. As a side effect it also sets the **terminal
+window title** to `<agent> · <repo> · <start>` — the widget runs on every statusline render,
+so no extra hook is needed. Set `CC_AGENT_SESSION_NO_TITLE=1` to opt out, or run
+`cc-agent-session --title` from a `SessionStart`/`UserPromptSubmit` hook to set the title
+without the statusline widget.
+
+The start time is the first timestamp in the
 session's jsonl, so it survives `--resume`. The agent label comes from
 `~/.envoak/session-identity/<session-id>.env` (written by the `dawn` skill), falling back to
 `~/.envoak/current-identity.env` and then `$TOAK_AGENT_ID` — without envoak it just prints
