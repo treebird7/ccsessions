@@ -110,11 +110,28 @@ curl -fsSL https://raw.githubusercontent.com/treebird7/ccsessions/main/cc-agent-
   -o ~/.local/bin/cc-agent-session && chmod +x ~/.local/bin/cc-agent-session
 ```
 
-Add it as another **Custom Command** widget. As a side effect it also sets the **terminal
-window title** to `<agent> · <repo> · <start>` — the widget runs on every statusline render,
-so no extra hook is needed. Set `CC_AGENT_SESSION_NO_TITLE=1` to opt out, or run
-`cc-agent-session --title` from a `SessionStart`/`UserPromptSubmit` hook to set the title
-without the statusline widget.
+Add it as another **Custom Command** widget.
+
+#### Terminal window title
+
+As a side effect the widget also sets the **terminal window title** to
+`<agent> · <repo> · <start>`, so you can tell your windows apart from the taskbar:
+
+```
+sherlock-m5 · Toak · Jul31 13:36
+```
+
+The widget already runs on every statusline render, so this is free — nothing to install and
+no hook to register. The escape goes straight to `/dev/tty`, because both widget and hook
+stdout belong to Claude Code, not to your terminal.
+
+- `CC_AGENT_SESSION_NO_TITLE=1` — keep the statusline segment, drop the title.
+- `cc-agent-session --title` — title only, no stdout. Use it from a `SessionStart` /
+  `UserPromptSubmit` hook if you want the title *without* the statusline widget, or if
+  Claude Code's own title overwrites it between renders.
+- `CC_TITLE_TTY=/tmp/x` — write the escape to a file instead, to see what it would set.
+
+#### Where the values come from
 
 The start time is the first timestamp in the
 session's jsonl, so it survives `--resume`. The agent label comes from
