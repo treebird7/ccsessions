@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""ccstatusline widget: agent label (envoak/dawn) + session start time.
+
+Context % is already covered by ccstatusline's built-in context widgets.
+"""
+import glob
+import json
+import os
+import re
+from datetime import datetime
+
+HOME = os.path.expanduser('~')
+sid = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+
+
+def agent():
+    # session-scoped identity (written by dawn) wins over the shared one
+    paths = [f'{HOME}/.envoak/session-identity/{sid}.env' if sid else None,
+             f'{HOME}/.envoak/current-identity.env']
+    for p in paths:
+        if not p or not os.path.exists(p):
+            continue
+        m = re.search(r'ENVOAK_AGENT_LABEL="?([^"\n]+)', open(p).read())
+        if m:
+            return m.group(1)
+    return os.environ.get('TOAK_AGENT_ID', '?')
+
+
+def started():
+    hits = glob.glob(f'{HOME}/.claude/projects/*/{sid}.jsonl') if sid else []
+    if not hits:
+        return None
+    with open(hits[0]) as f:
+        for line in f:
+            ts = json.loads(line).get('timestamp')
+            if ts:
+                # stored UTC ("...Z"); show local
+                utc = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                return utc.astimezone().strftime('%b%d %H:%M')
+    return None
+
+
+def pinned():
+    """📌 when ccsessions/tbe has this session frozen — same file `tbe freeze` writes."""
+    try:
+        with open(f'{HOME}/.claude/ccsessions-frozen.json') as f:
+            return sid in json.load(f)
+    except Exception:
+        return False
+
+
+parts = [agent()]
+t = started()
+if t:
+    parts.append(t)
+line = ' · '.join(parts)
+print(f'📌 {line}' if pinned() else line)

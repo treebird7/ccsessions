@@ -7,6 +7,8 @@
 - Default listing is now **100** sessions (was 30). Override with the `CCSESSIONS_LIMIT` env var, `-n <count>`, or `-a` for all.
 
 ### Added
+- **Agent + session-start columns**: every listing (flat, grouped, 📌 frozen) now shows when the session started — the first timestamp in its jsonl, so it survives `--resume` — and the agent label pinned to it in `~/.envoak/session-identity/<id>.env`. The agent column is dropped entirely when no listed session has a label, so non-envoak users lose no width. `--json` rows gain `started`, `started_local`, and `agent`; the text filter matches agent labels too.
+- `cc-agent-session`: companion ccstatusline widget printing `<agent> · <session start>`, prefixed with 📌 when `tbe freeze` has pinned the session (same `ccsessions-frozen.json`).
 - Repo now ships a `tbe` symlink (→ `ccsessions`) alongside the script itself, matching the
   `~/.local/bin/tbe` install symlink.
 - **Freeze / thaw**: pin a session for later with a note. `tbe freeze [N] [note…]` (no N = the session you're currently in, via `CLAUDE_CODE_SESSION_ID`; with N = a number from the last listing). Frozen sessions show in a 📌 section pinned to the top of every listing — always visible even when older than the scan window — and carry your note. `tbe thaw <#|id>` unpins. State lives in `~/.claude/ccsessions-frozen.json`; `--json` rows gain a `frozen` flag.

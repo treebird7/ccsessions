@@ -53,6 +53,8 @@ ccsessions ibn        # filter by project or preview text
 ```
 
 - **● green dot** = a `claude` process is currently running in that project's directory.
+- **agent + start columns** = the agent label pinned to that session (envoak/dawn users; the
+  column disappears entirely when no listed session has one) and when the session began.
 - **preview** = the session's first real user message (skill/command boilerplate is skipped),
   or its saved summary if one exists.
 - Picking a session runs `claude --resume <id>` in that session's working directory.
@@ -93,6 +95,26 @@ for i, f in enumerate(files[:60], 1):
 ```
 
 Then in `ccstatusline --tui`, add a **Custom Command** widget with command `cc-session-num`.
+
+### Agent label + session start (`cc-agent-session`)
+
+A second widget prints the session's agent label and when the session started, plus a 📌 when
+`tbe freeze` has it pinned:
+
+```
+sherlock-m5 · Jul31 13:36
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/treebird7/ccsessions/main/cc-agent-session \
+  -o ~/.local/bin/cc-agent-session && chmod +x ~/.local/bin/cc-agent-session
+```
+
+Add it as another **Custom Command** widget. The start time is the first timestamp in the
+session's jsonl, so it survives `--resume`. The agent label comes from
+`~/.envoak/session-identity/<session-id>.env` (written by the `dawn` skill), falling back to
+`~/.envoak/current-identity.env` and then `$TOAK_AGENT_ID` — without envoak it just prints
+`$TOAK_AGENT_ID` or `?`.
 
 ## License
 

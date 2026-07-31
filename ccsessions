@@ -13,8 +13,10 @@ Usage:
 """
 import os, sys, json, glob, subprocess, time, re
 from collections import Counter
+from datetime import datetime
 
 PROJECTS = os.path.expanduser("~/.claude/projects")
+SESSION_IDENTITY = os.path.expanduser("~/.envoak/session-identity")  # dawn writes <sid>.env
 FROZEN = os.path.expanduser("~/.claude/ccsessions-frozen.json")  # {id: {note, at, proj}}
 LAST = os.path.expanduser("~/.claude/ccsessions-last.json")      # [{n,id,proj,cwd}] of last render
 
@@ -51,9 +53,30 @@ def noisy(t):
             t.startswith("Base directory for this skill") or
             t.startswith("Caveat:") or "<command-" in t[:40])
 
+def agent_of(sid):
+    """Agent label dawn pinned to this session, '' if the session never ran dawn.
+    Only the per-session file — the shared current-identity.env would stamp the
+    SAME label on every row, which is worse than blank."""
+    try:
+        with open(os.path.join(SESSION_IDENTITY, f"{sid}.env")) as fh:
+            m = re.search(r'ENVOAK_AGENT_LABEL="?([^"\n]+)', fh.read())
+            return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+def when(iso):
+    """'2026-07-31T13:36:02.123Z' → local 'Jul31 13:36'."""
+    if not iso:
+        return ""
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%b%d %H:%M")
+    except Exception:
+        return ""
+
 def scan(path):
-    """Return (cwd, tldr, doing) — tldr is the gist, doing is the LATEST activity."""
-    cwd, summary, first_user = None, None, None
+    """Return (cwd, tldr, doing, started) — tldr is the gist, doing is the LATEST
+    activity, started is the first timestamp in the transcript (session birth)."""
+    cwd, summary, first_user, started = None, None, None, None
     try:
         with open(path, "r", errors="ignore") as fh:
             for line in fh:
@@ -62,6 +85,7 @@ def scan(path):
                 except Exception:
                     continue
                 cwd = cwd or d.get("cwd")
+                started = started or d.get("timestamp")
                 if d.get("type") == "summary" and not summary:
                     summary = d.get("summary")
                 if first_user is None and d.get("type") == "user":
@@ -70,12 +94,12 @@ def scan(path):
                         t = text_of(msg.get("content")).strip()
                         if t and not noisy(t):
                             first_user = t
-                if cwd and summary:
+                if cwd and summary and started:
                     break
     except Exception:
         pass
     tldr = summary or first_user or "(no preview)"
-    return cwd, " ".join(tldr.split()), last_doing(path)
+    return cwd, " ".join(tldr.split()), last_doing(path), started
 
 def last_doing(path, nbytes=65536):
     """Tail the file for the most recent meaningful user/assistant text — the
@@ -154,11 +178,12 @@ def row_for(sid, live):
     f = find_file(sid)
     if not f:
         return None
-    cwd, tldr, doing = scan(f)
+    cwd, tldr, doing, started = scan(f)
     proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
     sid = os.path.basename(f)[:-6]
-    return {"id": sid, "cwd": cwd, "proj": proj, "tldr": tldr,
-            "doing": doing, "mtime": os.path.getmtime(f), "live": sid in live}
+    return {"id": sid, "cwd": cwd, "proj": proj, "tldr": tldr, "doing": doing,
+            "mtime": os.path.getmtime(f), "live": sid in live,
+            "started": started, "agent": agent_of(sid)}
 
 def cmd_freeze(rest):
     """tbe freeze [N] [note...]  — pin a session for later with an optional note.
@@ -195,7 +220,17 @@ def cmd_thaw(rest):
     else:
         print(f"not frozen: {key}")
 
-def print_pinned(rows, ago, frozen, start=0):
+def meta(r, w_agent):
+    """agent + session-start columns. w_agent=0 drops the agent column entirely
+    (nothing in this listing ran dawn), so we don't pay 10 blank chars a row."""
+    a = f"\033[36m{(r.get('agent') or '')[:w_agent]:<{w_agent}}\033[0m " if w_agent else ""
+    return f"{a}\033[2m{when(r.get('started')):<11}\033[0m"
+
+def agent_width(rows, cap=12):  # fits the longest real label, e.g. "spidersan-m5"
+    w = max((len(r.get("agent") or "") for r in rows), default=0)
+    return min(w, cap)
+
+def print_pinned(rows, ago, frozen, start=0, w_agent=0):
     """Render the 📌 frozen section at the very top. Returns rows in print order."""
     if not rows:
         return []
@@ -205,11 +240,12 @@ def print_pinned(rows, ago, frozen, start=0):
         i += 1; out.append(r)
         dot = "\033[32m●\033[0m" if r["live"] else " "
         note = frozen.get(r["id"], {}).get("note") or (r["doing"] or r["tldr"])
-        print(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  \033[35m{r['proj'][:14]:<14}\033[0m {note[:50]}")
+        print(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  \033[35m{r['proj'][:14]:<14}\033[0m "
+              f"{meta(r, w_agent)}  {note[:44]}")
     print()
     return out
 
-def print_grouped(rows, ago, start=0):
+def print_grouped(rows, ago, start=0, w_agent=0):
     """Cockpit view: sessions bucketed by project, freshest project first.
     Returns rows in printed order so resume-by-number still lines up."""
     groups = {}
@@ -226,8 +262,8 @@ def print_grouped(rows, ago, start=0):
         for r in g:
             i += 1; out.append(r)
             dot = "\033[32m●\033[0m" if r["live"] else " "
-            line = (r["doing"] or r["tldr"])[:64]
-            print(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  {line}")
+            line = (r["doing"] or r["tldr"])[:58]
+            print(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  {meta(r, w_agent)}  {line}")
         print()
     print(f"  \033[32m●\033[0m = running   ({len(out)} sessions, {len(order)} projects)")
     return out
@@ -238,6 +274,13 @@ def _selftest():
     m = re.search(r"--resume\s+([0-9a-fA-F-]{36})", f"claude --resume {rid} --dangerously-skip-permissions")
     assert m and m.group(1) == rid, "resume regex"
     assert "/Users/freedbird/Dev/Envoak".replace("/", "-") == "-Users-freedbird-Dev-Envoak", "projdir encoding"
+    # UTC transcript stamps must land in local time, and a missing one must not blow up
+    os.environ["TZ"] = "UTC"; time.tzset()
+    assert when("2026-07-31T13:36:02.123Z") == "Jul31 13:36", "timestamp format"
+    assert when(None) == "" and when("garbage") == "", "timestamp fallbacks"
+    assert agent_of("no-such-session-id") == "", "agent fallback"
+    assert agent_width([{"agent": "sherlock-m5"}, {"agent": ""}]) == 11, "agent column width"
+    assert agent_width([{"agent": ""}]) == 0, "agent column hidden when unused"
     print("selftest ok"); return
 
 def main():
@@ -262,14 +305,16 @@ def main():
     live = running_sessions()
     rows = []
     for f in files:
-        cwd, tldr, doing = scan(f)
+        cwd, tldr, doing, started = scan(f)
         proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
-        if filt and filt not in proj.lower() and filt not in tldr.lower() and filt not in doing.lower():
-            continue
         sid = os.path.basename(f)[:-6]
+        agent = agent_of(sid)
+        if filt and not any(filt in s.lower() for s in (proj, tldr, doing, agent)):
+            continue
         rows.append({
             "id": sid, "cwd": cwd, "proj": proj, "tldr": tldr,
             "doing": doing, "mtime": os.path.getmtime(f), "live": sid in live,
+            "started": started, "agent": agent,
         })
         if len(rows) >= limit:
             break
@@ -299,11 +344,13 @@ def main():
     if as_json:
         for r in rows + pinned_ids:
             r["ago"] = ago(r["mtime"]); r["frozen"] = r["id"] in frozen
+            r["started_local"] = when(r.get("started"))
         print(json.dumps(pinned_ids + rows, indent=2)); return
 
-    pinned = print_pinned(pinned_ids, ago, frozen)
+    w_agent = agent_width(rows + pinned_ids)
+    pinned = print_pinned(pinned_ids, ago, frozen, w_agent=w_agent)
     if grouped:
-        body = print_grouped(rows, ago, start=len(pinned))
+        body = print_grouped(rows, ago, start=len(pinned), w_agent=w_agent)
     else:
         body = []
         print()
@@ -311,8 +358,9 @@ def main():
             body.append(r)
             dot = "\033[32m●\033[0m" if r["live"] else " "
             proj = (r["proj"] or "?")[:22]
-            line = (r["doing"] or r["tldr"])[:70]
-            print(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  {line}")
+            line = (r["doing"] or r["tldr"])[:64]
+            print(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  "
+                  f"{meta(r, w_agent)}  {line}")
         print(f"\n  \033[32m●\033[0m = running   ({len(rows)} shown)")
     rows = pinned + body
     save_json(LAST, [{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"]}
