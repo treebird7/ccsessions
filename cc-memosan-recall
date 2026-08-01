@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""ccstatusline widget: what memosan has queued, not just that it has something.
+
+`cc-agent-session` already shows a 💡 when the inbox is non-empty. This shows the
+title of the top suggestion, so the passive lamp is worth glancing at:
+
+    💡 knowledge: heartwood.md (0.66) +2
+
+Prints nothing at all when the inbox is empty — an empty statusline row is the
+correct rendering of "the librarian has nothing for you".
+"""
+import os
+import re
+
+INBOX = os.path.expanduser('~/.memosan/proactive-inbox.md')
+# what scripts/proactive-scorer.ts writes: "- **<title>** (0.66, memosan #12) — <snippet>"
+ENTRY = re.compile(r'^- \*\*(?P<title>.+?)\*\* \((?P<score>[0-9.]+)')
+MAX_TITLE = 40
+
+
+def entries():
+    try:
+        with open(INBOX) as f:
+            return [m.groupdict() for m in map(ENTRY.match, f) if m]
+    except OSError:
+        return []
+
+
+def render():
+    rows = entries()
+    if not rows:
+        return ''
+    top = rows[0]
+    title = top['title']
+    if len(title) > MAX_TITLE:
+        title = title[:MAX_TITLE - 1] + '…'
+    line = f"💡 {title} ({top['score']})"
+    return f'{line} +{len(rows) - 1}' if len(rows) > 1 else line
+
+
+if __name__ == '__main__':
+    out = render()
+    if out:
+        print(out)

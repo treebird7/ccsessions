@@ -143,6 +143,27 @@ A trailing 💡 means `~/.memosan/proactive-inbox.md` is non-empty — the
 design: the statusline says something is waiting, rather than a hook injecting it into the agent's
 context on every prompt. No memosan, no file, no 💡.
 
+### What memosan queued (`cc-memosan-recall`)
+
+`cc-agent-session`'s 💡 says *something* is waiting. This widget says *what* — the top queued
+suggestion, on a statusline row of its own:
+
+```
+💡 knowledge: heartwood.md (0.66) +2
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/treebird7/ccsessions/main/cc-memosan-recall \
+  -o ~/.local/bin/cc-memosan-recall && chmod +x ~/.local/bin/cc-memosan-recall
+```
+
+Add it as a **Custom Command** widget — a row of its own suits it, since it prints nothing at
+all when the inbox is empty, and an empty row is the right rendering of "the librarian has
+nothing for you". `+N` counts the suggestions below the top one; titles longer than 40 chars
+are truncated. It reads the same `~/.memosan/proactive-inbox.md` the 💡 does, written by
+memosan's `scripts/proactive-scorer.ts` and cleared by its delivery hook — so the row empties
+itself once the suggestion has actually reached the agent.
+
 #### Where the values come from
 
 The start time is the first timestamp in the
