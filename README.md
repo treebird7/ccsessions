@@ -160,9 +160,16 @@ curl -fsSL https://raw.githubusercontent.com/treebird7/ccsessions/main/cc-memosa
 Add it as a **Custom Command** widget — a row of its own suits it, since it prints nothing at
 all when the inbox is empty, and an empty row is the right rendering of "the librarian has
 nothing for you". `+N` counts the suggestions below the top one; titles longer than 40 chars
-are truncated. It reads the same `~/.memosan/proactive-inbox.md` the 💡 does, written by
-memosan's `scripts/proactive-scorer.ts` and cleared by its delivery hook — so the row empties
-itself once the suggestion has actually reached the agent.
+are truncated. It reads the same inbox the 💡 does, written by memosan's
+`scripts/proactive-scorer.ts` and cleared by its delivery hook — so the row empties itself
+once the suggestion has actually reached the agent.
+
+Both indicators read `~/.memosan/proactive-inbox-<session>.md`, i.e. only what memosan queued
+for *this* session, falling back to the legacy shared `proactive-inbox.md` for older memosan
+installs. The distinction matters when you run several sessions at once: the delivery hook
+clears whatever inbox it reads, so with one shared file the first session to prompt collects
+a suggestion scored from another session's topic, and the lamp lights in sessions that will
+never receive it.
 
 #### Where the values come from
 

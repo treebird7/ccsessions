@@ -70,12 +70,23 @@ def repo():
 
 
 def waiting():
-    """💡 when memosan has a proactive recall queued. Passive: the statusline shows
-    that the librarian has something, instead of a hook shoving it into context."""
-    try:
-        return os.path.getsize(f'{HOME}/.memosan/proactive-inbox.md') > 0
-    except OSError:
-        return False
+    """💡 when memosan has a proactive recall queued for THIS session. Passive: the
+    statusline shows that the librarian has something, instead of a hook shoving it
+    into context.
+
+    memosan queues per session; the legacy shared file is the fallback so an older
+    memosan still lights the lamp. Reading the shared file unconditionally would lit
+    the lamp for suggestions another session is going to collect."""
+    safe = ''.join(c for c in sid if c.isalnum() or c == '-')
+    paths = ([f'{HOME}/.memosan/proactive-inbox-{safe}.md'] if safe else []) + \
+            [f'{HOME}/.memosan/proactive-inbox.md']
+    for p in paths:
+        try:
+            if os.path.getsize(p) > 0:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def render(with_repo):

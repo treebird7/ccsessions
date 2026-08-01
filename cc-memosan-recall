@@ -12,7 +12,14 @@ correct rendering of "the librarian has nothing for you".
 import os
 import re
 
-INBOX = os.path.expanduser('~/.memosan/proactive-inbox.md')
+# memosan queues per session — a shared inbox delivered to whichever session
+# prompted first, regardless of whose topic produced the suggestion. Show only
+# what is addressed to this session; fall back to the legacy shared file so an
+# older memosan still lights the row.
+_sid = ''.join(c for c in os.environ.get('CLAUDE_CODE_SESSION_ID', '') if c.isalnum() or c == '-')
+_MINE = os.path.expanduser(f'~/.memosan/proactive-inbox-{_sid}.md') if _sid else ''
+_SHARED = os.path.expanduser('~/.memosan/proactive-inbox.md')
+INBOX = _MINE if _MINE and os.path.exists(_MINE) else _SHARED
 # what scripts/proactive-scorer.ts writes: "- **<title>** (0.66, memosan #12) — <snippet>"
 ENTRY = re.compile(r'^- \*\*(?P<title>.+?)\*\* \((?P<score>[0-9.]+)')
 MAX_TITLE = 40
