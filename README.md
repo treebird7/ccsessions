@@ -136,6 +136,13 @@ shreds multi-byte glyphs into `�`. A hook fires between turns instead:
   for the frame-corruption reason above; fine in terminals that tolerate it.
 - `CC_TITLE_TTY=/tmp/x` — write the escape to a file instead, to see what it would set.
 
+#### Pending-recall indicator
+
+A trailing 💡 means `~/.memosan/proactive-inbox.md` is non-empty — the
+[memosan](https://github.com/treebird7/memosan) librarian has a recall queued for you. Passive by
+design: the statusline says something is waiting, rather than a hook injecting it into the agent's
+context on every prompt. No memosan, no file, no 💡.
+
 #### Where the values come from
 
 The start time is the first timestamp in the

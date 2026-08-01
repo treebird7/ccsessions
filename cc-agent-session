@@ -69,13 +69,24 @@ def repo():
         d = parent
 
 
+def waiting():
+    """💡 when memosan has a proactive recall queued. Passive: the statusline shows
+    that the librarian has something, instead of a hook shoving it into context."""
+    try:
+        return os.path.getsize(f'{HOME}/.memosan/proactive-inbox.md') > 0
+    except OSError:
+        return False
+
+
 def render(with_repo):
     parts = [agent()] + ([repo()] if with_repo else [])
     t = started()
     if t:
         parts.append(t)
     line = ' · '.join(parts)
-    return f'📌 {line}' if pinned() else line
+    if pinned():
+        line = f'📌 {line}'
+    return f'{line} 💡' if waiting() else line
 
 
 def set_title():
