@@ -10,6 +10,11 @@ Usage:
   ccsessions --json     # machine-readable dump (for birdsan orchestration)
   tbe freeze [N] [note] # pin a session for later (no N = current session)
   tbe thaw <#|id>       # unpin
+  tbe closed [N] [note] # mark a session closed — moves it to the (c) section
+  tbe reopen <#|id>     # un-close
+
+Interactive keys: number = resume, m = next 100 sessions, c = toggle closed
+section, s = search (project/tldr/doing/agent substring; empty query clears).
 """
 import os, sys, json, glob, subprocess, time, re
 from collections import Counter
@@ -18,6 +23,7 @@ from datetime import datetime
 PROJECTS = os.path.expanduser("~/.claude/projects")
 SESSION_IDENTITY = os.path.expanduser("~/.envoak/session-identity")  # dawn writes <sid>.env
 FROZEN = os.path.expanduser("~/.claude/ccsessions-frozen.json")  # {id: {note, at, proj}}
+CLOSED = os.path.expanduser("~/.claude/ccsessions-closed.json")  # {id: {note, at, proj}}
 LAST = os.path.expanduser("~/.claude/ccsessions-last.json")      # [{n,id,proj,cwd}] of last render
 
 def load_json(p, default):
@@ -101,9 +107,17 @@ def scan(path):
     tldr = summary or first_user or "(no preview)"
     return cwd, " ".join(tldr.split()), last_doing(path), started
 
+def last_paragraph(t):
+    """Final paragraph of a message — the conclusion/next-step, which is what you
+    need when deciding whether to resume. Skips trailing code fences."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
+    while paras and paras[-1].startswith("```"):
+        paras.pop()
+    return paras[-1] if paras else t
+
 def last_doing(path, nbytes=65536):
-    """Tail the file for the most recent meaningful user/assistant text — the
-    freshest 'what it's doing now', truer than a stale hive signal.
+    """Tail the file for the LAST PARAGRAPH of the most recent meaningful
+    user/assistant message — the freshest 'where this left off'.
     ponytail: 64KB tail, not a full read; bump if last turns are huge."""
     try:
         sz = os.path.getsize(path)
@@ -121,7 +135,7 @@ def last_doing(path, nbytes=65536):
         if d.get("type") in ("user", "assistant"):
             t = text_of((d.get("message") or {}).get("content")).strip()
             if t and not noisy(t):
-                return " ".join(t.split())[:200]
+                return " ".join(last_paragraph(t).split())[:200]
     return ""
 
 def _proc_cwd(pid):
@@ -185,40 +199,50 @@ def row_for(sid, live):
             "mtime": os.path.getmtime(f), "live": sid in live,
             "started": started, "agent": agent_of(sid)}
 
-def cmd_freeze(rest):
-    """tbe freeze [N] [note...]  — pin a session for later with an optional note.
-    N resolves against the last listing; with no N, freezes the CURRENT session."""
-    frozen = load_json(FROZEN, {})
-    sid, proj = None, None
+def _resolve_sid(rest, verb):
+    """(sid, proj, remaining-args). Leading number resolves against the last
+    listing; no number = the CURRENT session ($CLAUDE_CODE_SESSION_ID)."""
     if rest and rest[0].isdigit():
-        n = int(rest[0]); rest = rest[1:]
+        n = int(rest[0])
         row = next((r for r in load_json(LAST, []) if r["n"] == n), None)
         if not row:
-            print(f"no #{n} in the last listing — run `tbe` first, then freeze."); return
-        sid, proj = row["id"], row.get("proj")
-    else:
-        sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
-        if not sid:
-            print("not inside a session — use: tbe freeze <#> [note]"); return
-    frozen[sid] = {"note": " ".join(rest), "at": time.time(), "proj": proj}
-    save_json(FROZEN, frozen)
-    print(f"📌 frozen {sid[:8]} — {frozen[sid]['note'] or '(no note)'}")
+            print(f"no #{n} in the last listing — run `tbe` first, then {verb}.")
+            return None, None, rest[1:]
+        return row["id"], row.get("proj"), rest[1:]
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not sid:
+        print(f"not inside a session — use: tbe {verb} <#> [note]")
+    return sid, None, rest
 
-def cmd_thaw(rest):
-    frozen = load_json(FROZEN, {})
+def _mark(path, rest, verb, emoji):
+    """Shared body of freeze/closed: stamp {note, at, proj} for a session."""
+    sid, proj, rest = _resolve_sid(rest, verb)
+    if not sid:
+        return
+    marks = load_json(path, {})
+    marks[sid] = {"note": " ".join(rest), "at": time.time(), "proj": proj}
+    save_json(path, marks)
+    print(f"{emoji} {verb} {sid[:8]} — {marks[sid]['note'] or '(no note)'}")
+
+def _unmark(path, rest, verb, emoji, done, noun):
+    marks = load_json(path, {})
     if not rest:
-        print("usage: tbe thaw <#|id>"); return
+        print(f"usage: tbe {verb} <#|id>"); return
     key = rest[0]
-    sid = None
     if key.isdigit():
         row = next((r for r in load_json(LAST, []) if r["n"] == int(key)), None)
         sid = row["id"] if row else None
     else:
-        sid = next((k for k in frozen if k.startswith(key)), key)
-    if sid in frozen:
-        del frozen[sid]; save_json(FROZEN, frozen); print(f"🫧 thawed {sid[:8]}")
+        sid = next((k for k in marks if k.startswith(key)), key)
+    if sid in marks:
+        del marks[sid]; save_json(path, marks); print(f"{emoji} {done} {sid[:8]}")
     else:
-        print(f"not frozen: {key}")
+        print(f"not {noun}: {key}")
+
+def cmd_freeze(rest): _mark(FROZEN, rest, "freeze", "📌")
+def cmd_thaw(rest):   _unmark(FROZEN, rest, "thaw", "🫧", "thawed", "frozen")
+def cmd_closed(rest): _mark(CLOSED, rest, "closed", "🌙")
+def cmd_reopen(rest): _unmark(CLOSED, rest, "reopen", "🌤", "reopened", "closed")
 
 def meta(r, w_agent):
     """agent + session-start columns. w_agent=0 drops the agent column entirely
@@ -281,6 +305,11 @@ def _selftest():
     assert agent_of("no-such-session-id") == "", "agent fallback"
     assert agent_width([{"agent": "sherlock-m5"}, {"agent": ""}]) == 11, "agent column width"
     assert agent_width([{"agent": ""}]) == 0, "agent column hidden when unused"
+    # last_paragraph: conclusion wins, trailing code fence skipped, plain text intact
+    msg = "Idea good, half exists.\n\nMiddle detail.\n\nWant me build it? Piece 2+3 in repo."
+    assert last_paragraph(msg) == "Want me build it? Piece 2+3 in repo.", "last paragraph"
+    assert last_paragraph("Fix:\n\n```py\nx=1\n```") == "Fix:", "code fence skipped"
+    assert last_paragraph("one liner") == "one liner", "single paragraph"
     print("selftest ok"); return
 
 def main():
@@ -288,6 +317,8 @@ def main():
     if args and args[0] == "--selftest": return _selftest()
     if args and args[0] == "freeze": return cmd_freeze(args[1:])
     if args and args[0] == "thaw":   return cmd_thaw(args[1:])
+    if args and args[0] == "closed": return cmd_closed(args[1:])
+    if args and args[0] == "reopen": return cmd_reopen(args[1:])
     limit, filt = int(os.environ.get("CCSESSIONS_LIMIT", "100")), None
     as_json = "--json" in args; args = [a for a in args if a != "--json"]
     # Invoked as `tbe` (TreeBirdsEye) → grouped cockpit by default.
@@ -302,25 +333,33 @@ def main():
     files = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
     files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
 
+    frozen = load_json(FROZEN, {})
+    closed = load_json(CLOSED, {})
     live = running_sessions()
-    rows = []
-    for f in files:
-        cwd, tldr, doing, started = scan(f)
-        proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
-        sid = os.path.basename(f)[:-6]
-        agent = agent_of(sid)
-        if filt and not any(filt in s.lower() for s in (proj, tldr, doing, agent)):
-            continue
-        rows.append({
-            "id": sid, "cwd": cwd, "proj": proj, "tldr": tldr,
-            "doing": doing, "mtime": os.path.getmtime(f), "live": sid in live,
-            "started": started, "agent": agent,
-        })
-        if len(rows) >= limit:
-            break
+    rows, fiter = [], iter(files)
 
-    if not rows:
-        print("No sessions found." if not as_json else "[]"); return
+    def take(k):
+        """Scan the next k matching sessions into rows. Closed sessions are
+        skipped here — they live in the (c) section (frozen outranks closed)."""
+        for f in fiter:
+            if k <= 0:
+                return
+            sid = os.path.basename(f)[:-6]
+            if sid in closed and sid not in frozen:
+                continue
+            cwd, tldr, doing, started = scan(f)
+            proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
+            agent = agent_of(sid)
+            if filt and not any(filt in s.lower() for s in (proj, tldr, doing, agent)):
+                continue
+            rows.append({
+                "id": sid, "cwd": cwd, "proj": proj, "tldr": tldr,
+                "doing": doing, "mtime": os.path.getmtime(f), "live": sid in live,
+                "started": started, "agent": agent,
+            })
+            k -= 1
+
+    take(limit)
 
     now = time.time()
     def ago(t):
@@ -329,57 +368,109 @@ def main():
         if s < 86400: return f"{int(s//3600)}h"
         return f"{int(s//86400)}d"
 
-    # Frozen sessions are pinned to the top, always shown even if older than the
-    # scan window — fetch any that the scan missed, and pull pinned out of the body.
-    frozen = load_json(FROZEN, {})
-    pinned_ids = [s for s in rows if s["id"] in frozen]
-    have = {r["id"] for r in pinned_ids}
-    for sid in frozen:
-        if sid not in have:
+    def closed_rows():
+        """Rows for every closed session, newest first. The close note (why it
+        ended) wins over the transcript tail when present."""
+        out = []
+        for sid, mark in closed.items():
+            if sid in frozen:
+                continue
             r = row_for(sid, live)
-            if r: pinned_ids.append(r)
-    pinned_ids.sort(key=lambda r: frozen.get(r["id"], {}).get("at", 0), reverse=True)
-    rows = [r for r in rows if r["id"] not in frozen]
+            if r:
+                if mark.get("note"):
+                    r["doing"] = mark["note"]
+                if filt and not any(filt in (r.get(k) or "").lower()
+                                    for k in ("proj", "tldr", "doing", "agent")):
+                    continue
+                out.append(r)
+        out.sort(key=lambda r: r["mtime"], reverse=True)
+        return out
+
+    def pinned_rows():
+        """Frozen sessions, always shown even if older than the scan window."""
+        out = [r for r in rows if r["id"] in frozen]
+        have = {r["id"] for r in out}
+        for sid in frozen:
+            if sid not in have:
+                r = row_for(sid, live)
+                if r: out.append(r)
+        out.sort(key=lambda r: frozen.get(r["id"], {}).get("at", 0), reverse=True)
+        return out
 
     if as_json:
-        for r in rows + pinned_ids:
+        pinned = pinned_rows()
+        body = [r for r in rows if r["id"] not in frozen]
+        all_rows = pinned + body + closed_rows()
+        if not all_rows:
+            print("[]"); return
+        for r in all_rows:
             r["ago"] = ago(r["mtime"]); r["frozen"] = r["id"] in frozen
+            r["closed"] = r["id"] in closed
             r["started_local"] = when(r.get("started"))
-        print(json.dumps(pinned_ids + rows, indent=2)); return
+        print(json.dumps(all_rows, indent=2)); return
 
-    w_agent = agent_width(rows + pinned_ids)
-    pinned = print_pinned(pinned_ids, ago, frozen, w_agent=w_agent)
-    if grouped:
-        body = print_grouped(rows, ago, start=len(pinned), w_agent=w_agent)
-    else:
-        body = []
-        print()
-        for i, r in enumerate(rows, len(pinned) + 1):
-            body.append(r)
-            dot = "\033[32m●\033[0m" if r["live"] else " "
-            proj = (r["proj"] or "?")[:22]
-            line = (r["doing"] or r["tldr"])[:64]
-            print(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  "
-                  f"{meta(r, w_agent)}  {line}")
-        print(f"\n  \033[32m●\033[0m = running   ({len(rows)} shown)")
-    rows = pinned + body
-    save_json(LAST, [{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"]}
-                     for i, r in enumerate(rows, 1)])
+    if not rows and not frozen:
+        print("No sessions found."); return
 
-    try:
-        pick = input("\nResume # (Enter to quit): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print(); return
-    if not pick:
-        return
-    try:
-        r = rows[int(pick) - 1]
-    except (ValueError, IndexError):
-        print("invalid"); return
-    if not r["cwd"] or not os.path.isdir(r["cwd"]):
-        print(f"cwd missing: {r['cwd']}"); return
-    os.chdir(r["cwd"])
-    os.execvp("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"])
+    show_closed = False
+    while True:
+        pinned_ids = pinned_rows()
+        body_rows = [r for r in rows if r["id"] not in frozen]
+        cbody = closed_rows() if show_closed else []
+        w_agent = agent_width(pinned_ids + body_rows + cbody)
+        pinned = print_pinned(pinned_ids, ago, frozen, w_agent=w_agent)
+        if grouped:
+            body = print_grouped(body_rows, ago, start=len(pinned), w_agent=w_agent)
+        else:
+            body = []
+            print()
+            for i, r in enumerate(body_rows, len(pinned) + 1):
+                body.append(r)
+                dot = "\033[32m●\033[0m" if r["live"] else " "
+                proj = (r["proj"] or "?")[:22]
+                line = (r["doing"] or r["tldr"])[:64]
+                print(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  "
+                      f"{meta(r, w_agent)}  {line}")
+            print(f"\n  \033[32m●\033[0m = running   ({len(body)} shown)")
+        ordered = pinned + body
+        if show_closed:
+            if cbody:
+                print(f"\n\033[1;34m🌙 closed\033[0m \033[2m({len(cbody)})\033[0m")
+                ordered += print_grouped(cbody, ago, start=len(ordered), w_agent=w_agent)
+            else:
+                print("\n\033[1;34m🌙 closed\033[0m \033[2m(none)\033[0m")
+        save_json(LAST, [{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"]}
+                         for i, r in enumerate(ordered, 1)])
+
+        tag = f" \033[33m/{filt}\033[0m" if filt else ""
+        try:
+            pick = input(f"\nResume #{tag}  (m=+100 more, c=closed, s=search, Enter=quit): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(); return
+        if not pick:
+            return
+        if pick.lower() == "m":
+            take(100); continue
+        if pick.lower() == "c":
+            show_closed = not show_closed; continue
+        if pick.lower() == "s":
+            try:
+                q = input("search (empty=clear): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print(); return
+            filt = q or None
+            rows[:] = []          # rescan from the top under the new filter
+            fiter = iter(files)
+            take(limit)
+            continue
+        try:
+            r = ordered[int(pick) - 1]
+        except (ValueError, IndexError):
+            print("invalid"); continue
+        if not r["cwd"] or not os.path.isdir(r["cwd"]):
+            print(f"cwd missing: {r['cwd']}"); continue
+        os.chdir(r["cwd"])
+        os.execvp("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"])
 
 if __name__ == "__main__":
     main()
