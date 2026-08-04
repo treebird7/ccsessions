@@ -3,10 +3,15 @@
 ## Unreleased
 
 ### Changed
+- **Last-paragraph previews**: the `doing` column now shows the *final paragraph* of the last meaningful message (trailing code fences skipped) instead of its opening line — the conclusion/next-step is what you need when deciding whether to resume, not "Idea good,".
+- The interactive prompt is now a loop: invalid picks re-prompt instead of exiting, and new keys compose — `m` scans the next 100 sessions into the listing, `c` toggles the 🌙 closed section, `s` searches.
 - **Accurate live detection**: the `●` running marker is now per-**session** instead of per-**folder**. Previously every session that ever ran in a folder with a live `claude` lit up green (closed and ancient sessions included). Now each running `claude` process is mapped to its exact session — `--resume <id>` from the process args, or the newest recently-written jsonl in its cwd for fresh starts — so the live count matches the real number of running sessions.
 - Default listing is now **100** sessions (was 30). Override with the `CCSESSIONS_LIMIT` env var, `-n <count>`, or `-a` for all.
 
 ### Added
+- **Closed sessions**: `tbe closed [N] [note…]` marks a session closed (no N = the current session — `/close` and `/refresh` ceremonies run it automatically). Closed sessions disappear from the main listing and live in a 🌙 section at the bottom, toggled with `c`, grouped by project exactly like the main view and resumable by number. The close note wins over the transcript tail when present. `tbe reopen <#|id>` un-closes. Frozen outranks closed — a frozen+closed session stays 📌 pinned. State in `~/.claude/ccsessions-closed.json`; `--json` rows gain a `closed` flag and include closed sessions.
+- **`s` search**: press `s` at the prompt, type a query — rescans all transcripts under that filter (project/tldr/doing/agent substring), shows the active filter in the prompt as `/query`. Empty query clears. Composes with `m` (more matches) and `c` (closed matches are filtered too).
+- **`m` more**: press `m` at the prompt to scan the next 100 sessions into the listing.
 - **Agent + session-start columns**: every listing (flat, grouped, 📌 frozen) now shows when the session started — the first timestamp in its jsonl, so it survives `--resume` — and the agent label pinned to it in `~/.envoak/session-identity/<id>.env`. The agent column is dropped entirely when no listed session has a label, so non-envoak users lose no width. `--json` rows gain `started`, `started_local`, and `agent`; the text filter matches agent labels too.
 - `cc-agent-session`: companion ccstatusline widget printing `<agent> · <session start>`, prefixed with 📌 when `tbe freeze` has pinned the session (same `ccsessions-frozen.json`).
 - **Pending-recall indicator**: `cc-agent-session` appends 💡 when `~/.memosan/proactive-inbox.md` is non-empty, i.e. the memosan librarian has a recall queued. Passive on purpose — the statusline reports that something is waiting instead of a hook injecting it into agent context every prompt. Absent file, no indicator.
