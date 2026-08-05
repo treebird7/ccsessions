@@ -8,6 +8,9 @@
 - **Accurate live detection**: the `●` running marker is now per-**session** instead of per-**folder**. Previously every session that ever ran in a folder with a live `claude` lit up green (closed and ancient sessions included). Now each running `claude` process is mapped to its exact session — `--resume <id>` from the process args, or the newest recently-written jsonl in its cwd for fresh starts — so the live count matches the real number of running sessions.
 - Default listing is now **100** sessions (was 30). Override with the `CCSESSIONS_LIMIT` env var, `-n <count>`, or `-a` for all.
 
+### Fixed
+- **`cc-session-num` always printed `#1`**: it ranked sessions by mtime, and your own transcript is by definition the freshest file when your statusline renders. It now prints a stable short id — `#a28`, the first 3 chars of the session id — which is typable straight into `tbe resume a28`. `find_file` prefers prefix matches (newest wins on collision) so short ids resolve exactly.
+
 ### Added
 - **Closed sessions**: `tbe closed [N] [note…]` marks a session closed (no N = the current session — `/close` and `/refresh` ceremonies run it automatically). Closed sessions disappear from the main listing and live in a 🌙 section at the bottom, toggled with `c`, grouped by project exactly like the main view and resumable by number. The close note wins over the transcript tail when present. `tbe reopen <#|id>` un-closes. Frozen outranks closed — a frozen+closed session stays 📌 pinned. State in `~/.claude/ccsessions-closed.json`; `--json` rows gain a `closed` flag and include closed sessions.
 - **`s` search**: press `s` at the prompt, type a query — rescans all transcripts under that filter (project/tldr/doing/agent substring), shows the active filter in the prompt as `/query`. Empty query clears. Composes with `m` (more matches) and `c` (closed matches are filtered too).
