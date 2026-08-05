@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-import os, glob
+"""Statusline widget: short session id (#a28 = first 3 chars of the session id).
+Stable and typable — `tbe resume a28` resumes exactly this session. The old
+mtime-rank number was always #1: your own transcript is the freshest file at
+the moment your statusline renders."""
+import os
 sid = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
-files = sorted(glob.glob(os.path.expanduser('~/.claude/projects/*/*.jsonl')), key=os.path.getmtime, reverse=True)
-for i, f in enumerate(files[:60], 1):
-    if sid in f:
-        print(f'#{i}')
-        break
+if sid:
+    print(f'#{sid[:3]}')

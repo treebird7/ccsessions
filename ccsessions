@@ -185,8 +185,11 @@ def running_sessions():
     return live
 
 def find_file(sid):
-    g = glob.glob(os.path.join(PROJECTS, "*", f"*{sid}*.jsonl"))
-    return g[0] if g else None
+    """Prefix match first (statusline short ids are id prefixes), substring as
+    fallback; newest wins on collision — 3 hex chars can repeat across history."""
+    g = (glob.glob(os.path.join(PROJECTS, "*", f"{sid}*.jsonl")) or
+         glob.glob(os.path.join(PROJECTS, "*", f"*{sid}*.jsonl")))
+    return max(g, key=os.path.getmtime) if g else None
 
 def row_for(sid, live):
     """Build a row for a session id (may be older than the scan window)."""
