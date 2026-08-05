@@ -282,10 +282,12 @@ def cmd_closed(rest): _mark(CLOSED, rest, "closed", "🌙")
 def cmd_reopen(rest): _unmark(CLOSED, rest, "reopen", "🌤", "reopened", "closed")
 
 def meta(r, w_agent):
-    """agent + session-start columns. w_agent=0 drops the agent column entirely
-    (nothing in this listing ran dawn), so we don't pay 10 blank chars a row."""
+    """short-id + agent + session-start columns. The short id (first 3 chars of
+    the session id) matches the statusline's #a28 and feeds `tbe resume a28`.
+    w_agent=0 drops the agent column entirely (nothing in this listing ran
+    dawn), so we don't pay 10 blank chars a row."""
     a = f"\033[36m{(r.get('agent') or '')[:w_agent]:<{w_agent}}\033[0m " if w_agent else ""
-    return f"{a}\033[2m{when(r.get('started')):<11}\033[0m"
+    return f"\033[2m{r['id'][:3]}\033[0m {a}\033[2m{when(r.get('started')):<11}\033[0m"
 
 def agent_width(rows, cap=12):  # fits the longest real label, e.g. "spidersan-m5"
     w = max((len(r.get("agent") or "") for r in rows), default=0)
