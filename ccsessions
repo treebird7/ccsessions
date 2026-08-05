@@ -203,16 +203,33 @@ def row_for(sid, live):
             "mtime": os.path.getmtime(f), "live": sid in live,
             "started": started, "agent": agent_of(sid)}
 
+def _numeric_row(key, last_rows):
+    """Row from the last listing matching key-as-a-listing-number, or None if
+    key isn't all-digit or no row has that number. Pure (no I/O) so it's
+    testable without filesystem fixtures — real callers pass load_json(LAST,
+    []); tests pass a literal list."""
+    if not key.isdigit():
+        return None
+    return next((r for r in last_rows if r["n"] == int(key)), None)
+
 def _resolve_sid(rest, verb):
-    """(sid, proj, remaining-args). Leading number resolves against the last
-    listing; no number = the CURRENT session ($CLAUDE_CODE_SESSION_ID)."""
-    if rest and rest[0].isdigit():
-        n = int(rest[0])
-        row = next((r for r in load_json(LAST, []) if r["n"] == n), None)
-        if not row:
-            print(f"no #{n} in the last listing — run `tbe` first, then {verb}.")
+    """(sid, proj, remaining-args). Leading token resolves against the last
+    listing by number first (statusline short ids are 3 hex chars, some of
+    which are all-digit — a pure listing number must still win over a
+    same-looking id prefix); if no row has that number, fall back to
+    id-prefix resolution via find_file. No token = the CURRENT session
+    ($CLAUDE_CODE_SESSION_ID)."""
+    if rest:
+        row = _numeric_row(rest[0], load_json(LAST, []))
+        if row:
+            return row["id"], row.get("proj"), rest[1:]
+        if rest[0].isdigit():
+            f = find_file(rest[0])
+            r = row_for(os.path.basename(f)[:-6], set()) if f else None
+            if r:
+                return r["id"], r["proj"], rest[1:]
+            print(f"no #{rest[0]} in the last listing and no session matching {rest[0]} — run `tbe` first, then {verb}.")
             return None, None, rest[1:]
-        return row["id"], row.get("proj"), rest[1:]
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not sid:
         print(f"not inside a session — use: tbe {verb} <#> [note]")
@@ -233,11 +250,10 @@ def _unmark(path, rest, verb, emoji, done, noun):
     if not rest:
         print(f"usage: tbe {verb} <#|id>"); return
     key = rest[0]
-    if key.isdigit():
-        row = next((r for r in load_json(LAST, []) if r["n"] == int(key)), None)
-        sid = row["id"] if row else None
-    else:
-        sid = next((k for k in marks if k.startswith(key)), key)
+    row = _numeric_row(key, load_json(LAST, []))
+    # Pure listing number wins if present; otherwise (including a digit-only
+    # short id with no matching row) fall back to prefix match against marks.
+    sid = row["id"] if row else next((k for k in marks if k.startswith(key)), key)
     if sid in marks:
         del marks[sid]; save_json(path, marks); print(f"{emoji} {done} {sid[:8]}")
     else:
@@ -258,15 +274,17 @@ def cmd_resume(rest):
     if not rest:
         print('usage: tbe resume <#|id> [-p "prompt"]'); return 2
     key = rest[0]
-    if key.isdigit():
-        row = next((r for r in load_json(LAST, []) if r["n"] == int(key)), None)
-        if not row:
-            print(f"no #{key} in the last listing — run `tbe` first."); return 2
+    row = _numeric_row(key, load_json(LAST, []))
+    # Pure listing number wins if present; otherwise (including a digit-only
+    # short id with no matching row, e.g. `819`) fall back to id-prefix match.
+    if row:
         sid, cwd = row["id"], row.get("cwd")
     else:
         f = find_file(key)
         if not f:
-            print(f"no session matching: {key}"); return 2
+            msg = (f"no #{key} in the last listing and no session matching {key}."
+                    if key.isdigit() else f"no session matching: {key}")
+            print(msg); return 2
         sid, cwd = os.path.basename(f)[:-6], scan(f)[0]
     if not cwd or not os.path.isdir(cwd):
         print(f"cwd missing: {cwd}"); return 2
@@ -349,6 +367,14 @@ def _selftest():
     assert last_paragraph(msg) == "Want me build it? Piece 2+3 in repo.", "last paragraph"
     assert last_paragraph("Fix:\n\n```py\nx=1\n```") == "Fix:", "code fence skipped"
     assert last_paragraph("one liner") == "one liner", "single paragraph"
+    # numeric-key resolution: pure listing number wins; digit-only short id
+    # (e.g. "819") that ISN'T a listing number must not raise/mismatch here —
+    # callers fall back to find_file/prefix match when this returns None.
+    rows = [{"n": 3, "id": "abcd1234"}, {"n": 819, "id": "collide-row"}]
+    assert _numeric_row("3", rows)["id"] == "abcd1234", "pure listing number wins"
+    assert _numeric_row("819", rows)["id"] == "collide-row", "listing number that happens to look like a short id still wins"
+    assert _numeric_row("819", rows[:1]) is None, "digit-only short id with no matching row falls through"
+    assert _numeric_row("a28", rows) is None, "non-digit key never treated as a listing number"
     print("selftest ok"); return
 
 def main():
