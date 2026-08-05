@@ -12,6 +12,7 @@ Usage:
   tbe thaw <#|id>       # unpin
   tbe closed [N] [note] # mark a session closed — moves it to the (c) section
   tbe reopen <#|id>     # un-close
+  tbe resume <#|id> [-p "prompt"]  # resume a session; with -p, headless (agent-safe)
 
 Interactive keys: number = resume, m = next 100 sessions, c = toggle closed
 section, s = search (project/tldr/doing/agent substring; empty query clears).
@@ -239,6 +240,39 @@ def _unmark(path, rest, verb, emoji, done, noun):
     else:
         print(f"not {noun}: {key}")
 
+def cmd_resume(rest):
+    """tbe resume <#|id> [-p "prompt"] — resume a session by number (from the
+    last listing) or id prefix. With -p, runs `claude -p --resume` headless —
+    no TTY needed, so agents can call this from a Bash tool. Without -p,
+    execs the interactive TUI exactly like the picker."""
+    prompt = None
+    if "-p" in rest:
+        i = rest.index("-p")
+        prompt = " ".join(rest[i + 1:])
+        rest = rest[:i]
+        if not prompt:
+            print("empty -p prompt"); return 2
+    if not rest:
+        print('usage: tbe resume <#|id> [-p "prompt"]'); return 2
+    key = rest[0]
+    if key.isdigit():
+        row = next((r for r in load_json(LAST, []) if r["n"] == int(key)), None)
+        if not row:
+            print(f"no #{key} in the last listing — run `tbe` first."); return 2
+        sid, cwd = row["id"], row.get("cwd")
+    else:
+        f = find_file(key)
+        if not f:
+            print(f"no session matching: {key}"); return 2
+        sid, cwd = os.path.basename(f)[:-6], scan(f)[0]
+    if not cwd or not os.path.isdir(cwd):
+        print(f"cwd missing: {cwd}"); return 2
+    os.chdir(cwd)
+    if prompt:
+        return subprocess.call(["claude", "-p", "--resume", sid,
+                                "--dangerously-skip-permissions", prompt])
+    os.execvp("claude", ["claude", "--resume", sid, "--dangerously-skip-permissions"])
+
 def cmd_freeze(rest): _mark(FROZEN, rest, "freeze", "📌")
 def cmd_thaw(rest):   _unmark(FROZEN, rest, "thaw", "🫧", "thawed", "frozen")
 def cmd_closed(rest): _mark(CLOSED, rest, "closed", "🌙")
@@ -319,6 +353,7 @@ def main():
     if args and args[0] == "thaw":   return cmd_thaw(args[1:])
     if args and args[0] == "closed": return cmd_closed(args[1:])
     if args and args[0] == "reopen": return cmd_reopen(args[1:])
+    if args and args[0] == "resume": return cmd_resume(args[1:])
     limit, filt = int(os.environ.get("CCSESSIONS_LIMIT", "100")), None
     as_json = "--json" in args; args = [a for a in args if a != "--json"]
     # Invoked as `tbe` (TreeBirdsEye) → grouped cockpit by default.
@@ -473,4 +508,4 @@ def main():
         os.execvp("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"])
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
