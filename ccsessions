@@ -12,7 +12,10 @@ Usage:
   tbe thaw <#|id>       # unpin
   tbe closed [N] [note] # mark a session closed — moves it to the (c) section
   tbe reopen <#|id>     # un-close
-  tbe resume <#|id> [-p "prompt"]  # resume a session; with -p, headless (agent-safe)
+  tbe resume <#|id> [-p "prompt"] [--stream]  # resume; -p = headless (agent-safe),
+                        #   --stream announces the session id on stderr the
+                        #   moment claude starts, so `tbe watch <id>` can follow
+  tbe watch <#|id>      # follow a session's transcript live (headless runs too)
 
 Interactive keys: number = resume, m = next 100 sessions, c = toggle closed
 section, s = search (project/tldr/doing/agent substring; empty query clears).
@@ -259,12 +262,31 @@ def _unmark(path, rest, verb, emoji, done, noun):
     else:
         print(f"not {noun}: {key}")
 
+def _resolve_session(key):
+    """(sid, cwd) for a listing number or id prefix, (None, None) + message if
+    unresolvable. Pure listing number wins if present; otherwise (including a
+    digit-only short id with no matching row, e.g. `819`) id-prefix match."""
+    row = _numeric_row(key, load_json(LAST, []))
+    if row:
+        return row["id"], row.get("cwd")
+    f = find_file(key)
+    if not f:
+        msg = (f"no #{key} in the last listing and no session matching {key}."
+                if key.isdigit() else f"no session matching: {key}")
+        print(msg); return None, None
+    return os.path.basename(f)[:-6], scan(f)[0]
+
 def cmd_resume(rest):
-    """tbe resume <#|id> [-p "prompt"] — resume a session by number (from the
-    last listing) or id prefix. With -p, runs `claude -p --resume` headless —
-    no TTY needed, so agents can call this from a Bash tool. Without -p,
-    execs the interactive TUI exactly like the picker."""
-    prompt = None
+    """tbe resume <#|id> [-p "prompt"] [--stream] — resume a session by number
+    (from the last listing) or id prefix. With -p, runs `claude -p --resume`
+    headless — no TTY needed, so agents can call this from a Bash tool. With
+    --stream (implies headless), the session id is announced on stderr
+    the moment claude starts, so `tbe watch <shortid>` can follow it live;
+    stdout still carries only the final result text. Without -p, execs the
+    interactive TUI exactly like the picker."""
+    prompt, stream = None, False
+    if "--stream" in rest:
+        stream = True; rest = [a for a in rest if a != "--stream"]
     if "-p" in rest:
         i = rest.index("-p")
         prompt = " ".join(rest[i + 1:])
@@ -272,27 +294,88 @@ def cmd_resume(rest):
         if not prompt:
             print("empty -p prompt"); return 2
     if not rest:
-        print('usage: tbe resume <#|id> [-p "prompt"]'); return 2
-    key = rest[0]
-    row = _numeric_row(key, load_json(LAST, []))
-    # Pure listing number wins if present; otherwise (including a digit-only
-    # short id with no matching row, e.g. `819`) fall back to id-prefix match.
-    if row:
-        sid, cwd = row["id"], row.get("cwd")
-    else:
-        f = find_file(key)
-        if not f:
-            msg = (f"no #{key} in the last listing and no session matching {key}."
-                    if key.isdigit() else f"no session matching: {key}")
-            print(msg); return 2
-        sid, cwd = os.path.basename(f)[:-6], scan(f)[0]
+        print('usage: tbe resume <#|id> [-p "prompt"] [--stream]'); return 2
+    if stream and not prompt:
+        print("--stream needs -p (headless only)"); return 2
+    sid, cwd = _resolve_session(rest[0])
+    if not sid:
+        return 2
     if not cwd or not os.path.isdir(cwd):
         print(f"cwd missing: {cwd}"); return 2
     os.chdir(cwd)
+    if prompt and stream:
+        # stream-json: init event carries the session id, result event the
+        # final text. Pinned live 2026-08-05: headless --resume does NOT fork —
+        # it APPENDS to the original session's transcript (same id in init,
+        # same jsonl grows). Resuming a LIVE session therefore writes into a
+        # transcript another process is also writing.
+        p = subprocess.Popen(
+            ["claude", "-p", "--resume", sid, "--output-format", "stream-json",
+             "--verbose", "--dangerously-skip-permissions", prompt],
+            stdout=subprocess.PIPE, text=True)
+        final = ""
+        for line in p.stdout:
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("type") == "system" and d.get("subtype") == "init":
+                run_sid = d.get("session_id", "")
+                print(f"⏵ session {run_sid[:8]} running — follow with: tbe watch {run_sid[:8]}",
+                      file=sys.stderr, flush=True)
+            elif d.get("type") == "result":
+                final = d.get("result") or ""
+        p.wait()
+        print(final)
+        return p.returncode
     if prompt:
         return subprocess.call(["claude", "-p", "--resume", sid,
                                 "--dangerously-skip-permissions", prompt])
     os.execvp("claude", ["claude", "--resume", sid, "--dangerously-skip-permissions"])
+
+def cmd_watch(rest):
+    """tbe watch <#|id> — follow a session's transcript live (tail -f style).
+    Prints each new user/assistant text and tool call as it lands in the jsonl.
+    Works on headless runs the moment `resume --stream` announces their id.
+    Ctrl-C to stop."""
+    if not rest:
+        print("usage: tbe watch <#|id>"); return 2
+    sid, _ = _resolve_session(rest[0])
+    if not sid:
+        return 2
+    f = find_file(sid)
+    print(f"👁 watching {sid[:8]} ({os.path.basename(os.path.dirname(f))}) — Ctrl-C to stop")
+    def render(d):
+        t = d.get("type")
+        if t not in ("user", "assistant"):
+            return
+        msg = d.get("message") or {}
+        content = msg.get("content")
+        if isinstance(content, list):
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_use":
+                    print(f"  \033[2m⚙ {b.get('name')}\033[0m")
+                elif b.get("type") == "text" and b.get("text", "").strip():
+                    tag = "\033[36mA\033[0m" if t == "assistant" else "\033[33mU\033[0m"
+                    print(f"{tag} {' '.join(b['text'].split())[:300]}")
+        elif isinstance(content, str) and content.strip() and not noisy(content.strip()):
+            tag = "\033[36mA\033[0m" if t == "assistant" else "\033[33mU\033[0m"
+            print(f"{tag} {' '.join(content.split())[:300]}")
+    try:
+        with open(f, errors="ignore") as fh:
+            for line in fh:          # backlog first, then follow
+                try: render(json.loads(line))
+                except Exception: pass
+            while True:
+                line = fh.readline()
+                if not line:
+                    time.sleep(0.5); continue
+                try: render(json.loads(line))
+                except Exception: pass
+    except KeyboardInterrupt:
+        print(); return 0
 
 def cmd_freeze(rest): _mark(FROZEN, rest, "freeze", "📌")
 def cmd_thaw(rest):   _unmark(FROZEN, rest, "thaw", "🫧", "thawed", "frozen")
@@ -385,6 +468,7 @@ def main():
     if args and args[0] == "closed": return cmd_closed(args[1:])
     if args and args[0] == "reopen": return cmd_reopen(args[1:])
     if args and args[0] == "resume": return cmd_resume(args[1:])
+    if args and args[0] == "watch":  return cmd_watch(args[1:])
     limit, filt = int(os.environ.get("CCSESSIONS_LIMIT", "100")), None
     as_json = "--json" in args; args = [a for a in args if a != "--json"]
     # Invoked as `tbe` (TreeBirdsEye) → grouped cockpit by default.
