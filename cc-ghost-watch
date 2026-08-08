@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""cc-ghost-watch — UserPromptSubmit hook: surface 👻 ghost turns.
+
+A headless `tbe resume <id> -p` (or bare `claude -p --resume`) APPENDS its
+exchange to the target session's transcript — the live process never sees it
+(shared file, separate memory). This hook closes that gap: on every prompt it
+scans the transcript region written since the previous prompt and reports any
+user-prompt entry that was never submitted through THIS session's UI.
+
+Detection: the hook records a hash of each prompt the live user actually
+submits (hook stdin carries it). A real-text user entry in the new region
+whose hash was never recorded didn't come through this UI — a ghost. Tool
+results, command noise, and the live session's own turns are filtered out.
+
+Works for ALL Claude Code sessions — keyed on the session_id/transcript_path
+from hook stdin, no envoak/enlistment dependency.
+
+State: ~/.claude/ghost-watch/<session_id>.json  {offset, prompts[]}
+First fire baselines at current EOF, so pre-existing history never replays.
+
+Install (merge into ~/.claude/settings.json → hooks.UserPromptSubmit):
+    {"hooks": [{"type": "command",
+                "command": "python3 /path/to/cc-ghost-watch"}]}
+"""
+import hashlib
+import json
+import os
+import sys
+
+STATE_DIR = os.path.expanduser("~/.claude/ghost-watch")
+
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(b.get("text", "") for b in content
+                        if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def real_prompt(t):
+    """A human/agent-authored prompt, not tool traffic or command plumbing.
+    'Continue from where you left off.' is a synthetic marker the harness
+    stamps at the head of every headless resume — noise, not the ghost's ask
+    (the real -p prompt follows it)."""
+    return (t and not t.startswith("<") and "command-" not in t[:40]
+            and t != "Continue from where you left off.")
+
+
+def phash(t):
+    return hashlib.sha1(t.strip().encode()).hexdigest()[:12]
+
+
+def scan(path, offset, known):
+    """Ghost exchanges in the transcript region past `offset`: (prompt, reply)
+    pairs whose prompt hash is not in `known`."""
+    ghosts, cur = [], None
+    with open(path, errors="ignore") as fh:
+        fh.seek(offset)
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if d.get("type") == "user":
+                t = text_of((d.get("message") or {}).get("content")).strip()
+                if real_prompt(t):
+                    if phash(t) in known:
+                        cur = None          # our own turn — not a ghost
+                    else:
+                        cur = {"prompt": " ".join(t.split())[:150], "reply": ""}
+                        ghosts.append(cur)
+            elif d.get("type") == "assistant" and cur is not None:
+                t = text_of((d.get("message") or {}).get("content")).strip()
+                if t:
+                    cur["reply"] = " ".join(t.split())[:200]
+    return ghosts
+
+
+def main():
+    try:
+        inp = json.load(sys.stdin)
+    except Exception:
+        return 0
+    sid = inp.get("session_id")
+    path = inp.get("transcript_path", "")
+    if not sid or not os.path.exists(path):
+        return 0
+    os.makedirs(STATE_DIR, exist_ok=True)
+    sp = os.path.join(STATE_DIR, f"{sid}.json")
+    size = os.path.getsize(path)
+    try:
+        st = json.load(open(sp))
+    except Exception:
+        st = {"offset": size, "prompts": []}   # first sight: baseline, no replay
+
+    ghosts = scan(path, st["offset"], set(st["prompts"])) if size > st["offset"] else []
+
+    st["offset"] = size
+    prompt = (inp.get("prompt") or "").strip()
+    if prompt:
+        st["prompts"] = ([phash(prompt)] + st["prompts"])[:20]
+    json.dump(st, open(sp, "w"))
+
+    if ghosts:
+        print(f"👻 {len(ghosts)} ghost exchange(s) appended to this session's transcript "
+              f"by headless resume(s) since your last turn — you did not see these live:")
+        for g in ghosts[:5]:
+            print(f"  Q: {g['prompt']}")
+            if g["reply"]:
+                print(f"  A: {g['reply']}")
+        if len(ghosts) > 5:
+            print(f"  … and {len(ghosts) - 5} more (tbe watch {sid[:8]} to review)")
+    return 0
+
+
+def _selftest():
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tp = os.path.join(td, "t.jsonl")
+        entries = [
+            {"type": "user", "message": {"role": "user", "content": "my own prompt"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "my reply"}]}},
+            {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}},
+            {"type": "user", "message": {"role": "user", "content": "ghost question here"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "ghost answer"}]}},
+        ]
+        open(tp, "w").write("\n".join(json.dumps(e) for e in entries) + "\n")
+        g = scan(tp, 0, {phash("my own prompt")})
+        assert len(g) == 1 and g[0]["prompt"] == "ghost question here", g
+        assert g[0]["reply"] == "ghost answer", g
+        assert scan(tp, os.path.getsize(tp), set()) == [], "past-EOF offset yields nothing"
+        assert not real_prompt("<command-message>x</command-message>"), "command noise filtered"
+        assert not real_prompt("Continue from where you left off."), "resume marker filtered"
+    print("selftest ok")
+
+
+if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        _selftest()
+    else:
+        sys.exit(main())

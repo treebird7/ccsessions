@@ -8,6 +8,9 @@
 - **Accurate live detection**: the `●` running marker is now per-**session** instead of per-**folder**. Previously every session that ever ran in a folder with a live `claude` lit up green (closed and ancient sessions included). Now each running `claude` process is mapped to its exact session — `--resume <id>` from the process args, or the newest recently-written jsonl in its cwd for fresh starts — so the live count matches the real number of running sessions.
 - Default listing is now **100** sessions (was 30). Override with the `CCSESSIONS_LIMIT` env var, `-n <count>`, or `-a` for all.
 
+### Added (ghost hook)
+- **`cc-ghost-watch`**: UserPromptSubmit hook that surfaces 👻 ghost turns — exchanges a headless `tbe resume -p` appended to your session's transcript that your live process never saw. Records a hash of every prompt actually submitted through the UI; on each turn scans the transcript region written since the last one and reports any user-prompt entry with an unrecorded hash (Q + A, up to 5). Filters tool traffic, command plumbing, and the synthetic `Continue from where you left off.` marker the harness stamps on every headless resume. First fire baselines at EOF (no history replay); late-flushed entries are caught by the next fire. Works for ALL sessions — keyed on hook-stdin session_id/transcript_path, no envoak dependency. Install: add `python3 /path/to/cc-ghost-watch` under `hooks.UserPromptSubmit` in `~/.claude/settings.json`.
+
 ### Added (watch/stream)
 - **`tbe watch <#|id>`**: follow any session's transcript live, tail -f style — user/assistant text and tool calls as they land in the jsonl. Ctrl-C to stop.
 - **`tbe resume … -p --stream`**: headless resume that announces the session id on stderr the moment claude starts (`⏵ session a28… running — follow with: tbe watch a28…`); stdout still carries only the final result text. This is how you track a headless run mid-flight.
