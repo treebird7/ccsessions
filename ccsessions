@@ -212,6 +212,8 @@ def claim(sid, registry=None, locks=None):
     (it also covers the seconds before claude registers itself). Returns the refusal, or None.
     Headless -p resumes skip this on purpose: cc-ghost-watch is built on them landing in live sessions.
     ponytail: claude's children inherit the fd; one outliving claude keeps the lock — --force then."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid or ""):
+        return f"not a session id: {sid!r}"   # the lock path is built from it; the listing cache is just a file
     pid = registry_pid(sid, registry)
     if pid:
         return f"session {sid[:8]} is already running (pid {pid}); not starting a second writer."
@@ -323,8 +325,12 @@ def cmd_resume(rest):
     the moment claude starts, so `tbe watch <shortid>` can follow it live;
     stdout still carries only the final result text. Without -p, execs the
     interactive TUI exactly like the picker."""
-    prompt, stream, force = None, False, "--force" in rest
-    rest = [a for a in rest if a != "--force"]
+    # --force only before -p: everything after -p is the prompt, passed through untouched.
+    pre = rest[:rest.index("-p")] if "-p" in rest else rest
+    force = "--force" in pre
+    if force:
+        rest.remove("--force")
+    prompt, stream = None, False
     if "--stream" in rest:
         stream = True; rest = [a for a in rest if a != "--stream"]
     if "-p" in rest:
@@ -516,6 +522,8 @@ def _selftest():
         assert registry_pid(sid, reg) is None, "dead pid ignored"
         assert claim(sid, reg, locks) is None, "first claim takes the lock"
         assert "lock held" in (claim(sid, reg, locks) or ""), "second claim refused while the first holds it"
+        assert "not a session id" in (claim("/tmp/tbe-target", reg, locks) or ""), "path-shaped id refused"
+        assert not os.path.exists("/tmp/tbe-target.lock"), "no lock file outside LOCKS"
     print("selftest ok"); return
 
 def main():
