@@ -57,7 +57,7 @@ ccsessions ibn        # filter by project or preview text
   column disappears entirely when no listed session has one) and when the session began.
 - **preview** = the session's first real user message (skill/command boilerplate is skipped),
   or its saved summary if one exists.
-- Picking a session runs `claude --resume <id>` in that session's working directory.
+- Picking a session runs `claude --resume <id>` in that session's working directory. It refuses when that session is already running, or another `tbe resume` of it is starting (`tbe resume <id> --force` overrides).
 
 ### Resume flags
 
