@@ -12,15 +12,16 @@ Usage:
   tbe thaw <#|id>       # unpin
   tbe closed [N] [note] # mark a session closed — moves it to the (c) section
   tbe reopen <#|id>     # un-close
-  tbe resume <#|id> [-p "prompt"] [--stream]  # resume; -p = headless (agent-safe),
+  tbe resume <#|id> [-p "prompt"] [--stream] [--force]  # resume; -p = headless (agent-safe),
                         #   --stream announces the session id on stderr the
-                        #   moment claude starts, so `tbe watch <id>` can follow
+                        #   moment claude starts, so `tbe watch <id>` can follow;
+                        #   interactive resume refuses a session already live (--force)
   tbe watch <#|id>      # follow a session's transcript live (headless runs too)
 
 Interactive keys: number = resume, m = next 100 sessions, c = toggle closed
 section, s = search (project/tldr/doing/agent substring; empty query clears).
 """
-import os, sys, json, glob, subprocess, time, re
+import os, sys, json, glob, subprocess, time, re, fcntl
 from collections import Counter
 from datetime import datetime
 
@@ -29,6 +30,8 @@ SESSION_IDENTITY = os.path.expanduser("~/.envoak/session-identity")  # dawn writ
 FROZEN = os.path.expanduser("~/.claude/ccsessions-frozen.json")  # {id: {note, at, proj}}
 CLOSED = os.path.expanduser("~/.claude/ccsessions-closed.json")  # {id: {note, at, proj}}
 LAST = os.path.expanduser("~/.claude/ccsessions-last.json")      # [{n,id,proj,cwd}] of last render
+REGISTRY = os.path.expanduser("~/.claude/sessions")               # Claude Code's own <pid>.json per live process
+LOCKS = os.path.expanduser("~/.claude/tbe-locks")                 # <sid>.lock, flock held by the resumed claude
 
 def load_json(p, default):
     try:
@@ -187,6 +190,44 @@ def running_sessions():
                 live.add(sid); k -= 1
     return live
 
+def registry_pid(sid, registry=None):
+    """pid of a live claude registered for sid in Claude Code's ~/.claude/sessions/<pid>.json, else None.
+    Files of exited processes linger and pids get reused, so the pid must still have the file's
+    procStart (UTC, C locale: `Sun Oct  4 18:37:39 2026`) as its start time. No procStart: counts."""
+    for f in glob.glob(os.path.join(registry or REGISTRY, "*.json")):
+        d = load_json(f, {})
+        if not isinstance(d, dict) or d.get("sessionId") != sid or not isinstance(d.get("pid"), int): continue
+        try:
+            start = subprocess.check_output(["ps", "-o", "lstart=", "-p", str(d["pid"])], text=True,
+                                            stderr=subprocess.DEVNULL, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).split()
+        except Exception:
+            continue                      # not running
+        if not d.get("procStart") or str(d["procStart"]).split() == start:
+            return d["pid"]
+    return None
+
+def claim(sid, registry=None, locks=None):
+    """One interactive writer per session. Refuses when claude is already live on sid, else takes an
+    flock that exec carries into claude, so another `tbe resume` of sid refuses until claude exits
+    (it also covers the seconds before claude registers itself). Returns the refusal, or None.
+    Headless -p resumes skip this on purpose: cc-ghost-watch is built on them landing in live sessions.
+    ponytail: claude's children inherit the fd; one outliving claude keeps the lock — --force then."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid or ""):
+        return f"not a session id: {sid!r}"   # the lock path is built from it; the listing cache is just a file
+    pid = registry_pid(sid, registry)
+    if pid:
+        return f"session {sid[:8]} is already running (pid {pid}); not starting a second writer."
+    d = locks or LOCKS
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd = os.open(os.path.join(d, sid + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return f"session {sid[:8]} is being resumed elsewhere (tbe lock held); not starting a second writer. --force overrides."
+    os.set_inheritable(fd, True)
+    return None
+
 def find_file(sid):
     """Prefix match first (statusline short ids are id prefixes), substring as
     fallback; newest wins on collision — 3 hex chars can repeat across history."""
@@ -284,6 +325,11 @@ def cmd_resume(rest):
     the moment claude starts, so `tbe watch <shortid>` can follow it live;
     stdout still carries only the final result text. Without -p, execs the
     interactive TUI exactly like the picker."""
+    # --force only before -p: everything after -p is the prompt, passed through untouched.
+    pre = rest[:rest.index("-p")] if "-p" in rest else rest
+    force = "--force" in pre
+    if force:
+        rest.remove("--force")
     prompt, stream = None, False
     if "--stream" in rest:
         stream = True; rest = [a for a in rest if a != "--stream"]
@@ -331,6 +377,9 @@ def cmd_resume(rest):
     if prompt:
         return subprocess.call(["claude", "-p", "--resume", sid,
                                 "--dangerously-skip-permissions", prompt])
+    why = None if force else claim(sid)
+    if why:
+        print(why, file=sys.stderr); return 3
     os.execvp("claude", ["claude", "--resume", sid, "--dangerously-skip-permissions"])
 
 def cmd_watch(rest):
@@ -458,6 +507,23 @@ def _selftest():
     assert _numeric_row("819", rows)["id"] == "collide-row", "listing number that happens to look like a short id still wins"
     assert _numeric_row("819", rows[:1]) is None, "digit-only short id with no matching row falls through"
     assert _numeric_row("a28", rows) is None, "non-digit key never treated as a listing number"
+    # claim(): a live registered claude refuses; a stale file (dead pid) doesn't; a second claim refuses
+    import tempfile, uuid
+    with tempfile.TemporaryDirectory() as reg, tempfile.TemporaryDirectory() as locks:
+        sid, me = str(uuid.uuid4()), os.getpid()
+        mine = subprocess.check_output(["ps", "-o", "lstart=", "-p", str(me)], text=True,
+                                       env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).strip()
+        save_json(os.path.join(reg, "1.json"), {"pid": me, "sessionId": sid, "procStart": mine})
+        assert registry_pid(sid, reg) == me, "live registered pid found"
+        assert "already running" in (claim(sid, reg, locks) or ""), "live session refused"
+        save_json(os.path.join(reg, "1.json"), {"pid": me, "sessionId": sid, "procStart": "Thu Jan  1 00:00:00 1970"})
+        assert registry_pid(sid, reg) is None, "reused pid (start time differs) is not the session"
+        save_json(os.path.join(reg, "1.json"), {"pid": 999999, "sessionId": sid})
+        assert registry_pid(sid, reg) is None, "dead pid ignored"
+        assert claim(sid, reg, locks) is None, "first claim takes the lock"
+        assert "lock held" in (claim(sid, reg, locks) or ""), "second claim refused while the first holds it"
+        assert "not a session id" in (claim("/tmp/tbe-target", reg, locks) or ""), "path-shaped id refused"
+        assert not os.path.exists("/tmp/tbe-target.lock"), "no lock file outside LOCKS"
     print("selftest ok"); return
 
 def main():
@@ -619,6 +685,9 @@ def main():
             print("invalid"); continue
         if not r["cwd"] or not os.path.isdir(r["cwd"]):
             print(f"cwd missing: {r['cwd']}"); continue
+        why = claim(r["id"])
+        if why:
+            print(why); continue
         os.chdir(r["cwd"])
         os.execvp("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"])
 

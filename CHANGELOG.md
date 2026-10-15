@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added (single writer)
+- **Interactive resume refuses a second writer.** `tbe resume <id>` and the picker refuse (exit 3) when a `claude` is already live on that session — read from Claude Code's own `~/.claude/sessions/<pid>.json`, the pid confirmed by its start time — or when another `tbe resume` of it holds `~/.claude/tbe-locks/<id>.lock`. The flock is carried across `exec` into `claude`, so it also covers the seconds before claude registers itself, and frees when claude exits. `--force` overrides. Headless `-p` resumes are unchanged: cc-ghost-watch is built on them landing in live sessions. Envoak.app's Terminal button runs `tbe resume`, so it gets the same guard.
+
 ### Changed
 - **Last-paragraph previews**: the `doing` column now shows the *final paragraph* of the last meaningful message (trailing code fences skipped) instead of its opening line — the conclusion/next-step is what you need when deciding whether to resume, not "Idea good,".
 - The interactive prompt is now a loop: invalid picks re-prompt instead of exiting, and new keys compose — `m` scans the next 100 sessions into the listing, `c` toggles the 🌙 closed section, `s` searches.
