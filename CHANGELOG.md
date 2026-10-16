@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added (search)
+- **Full-text search.** The filter (`tbe foo bar`, `/foo` or `s` at the prompt) now reads the whole transcript — conversation, tool calls and output, subagent transcripts — plus session id, folder, branch, agent and freeze/close notes. Every word must match. It used to see only the first message and the last 200 characters, so `tbe-locks` found 0 of the 1 session that discussed it. Injected `<system-reminder>` text is ignored. Rows show the newest matching line instead of the generic preview.
+- **`tbe search <words…> [--json] [-n N]`**: ranked results (conversation hits ×3, tool ×1, newest first among strong matches), includes closed sessions, never prompts, exit 1 on no match. `--json` carries `id`, `cwd`, `score`, `hit`, `file` and no `tldr`/`doing`, so an agent sees only the one masked matching line of transcript text. Excludes the calling session (`$CLAUDE_CODE_SESSION_ID`), so an agent doesn't find its own query. Snippets mask credential shapes (`sk-`, `sb_secret_`, `ghp_`, JWTs, `evk1_`, private-key headers, 40+ hex, `KEY=value`) before printing, since they can come from tool output and land in an agent's context.
+- `-h`/`--help`. At the prompt, a short id (`a28`) resumes like a number.
+
+### Fixed
+- **Frozen sessions ignored the filter**: every filtered listing (and `--json foo`) returned all 📌 frozen sessions whatever the query. They're now filtered like the rest.
+- **Piped or agent runs hung** on the interactive prompt. With stdin not a terminal, `tbe` prints once and exits; with stdout not a terminal, no colour codes.
+- **Faster listing**: the preview scan read whole transcripts when a session had no saved summary; it now stops at the first real message (full `--json` listing 3.4s → 0.4s). Previews are cut to the terminal width instead of a fixed 44–64 chars.
+
 ### Added (single writer)
 - **Interactive resume refuses a second writer.** `tbe resume <id>` and the picker refuse (exit 3) when a `claude` is already live on that session — read from Claude Code's own `~/.claude/sessions/<pid>.json`, the pid confirmed by its start time — or when another `tbe resume` of it holds `~/.claude/tbe-locks/<id>.lock`. The flock is carried across `exec` into `claude`, so it also covers the seconds before claude registers itself, and frees when claude exits. `--force` overrides. Headless `-p` resumes are unchanged: cc-ghost-watch is built on them landing in live sessions. Envoak.app's Terminal button runs `tbe resume`, so it gets the same guard.
 
