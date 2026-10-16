@@ -13,7 +13,9 @@ Usage:
   tbe thaw <#|id>       # unpin
   tbe closed [N] [note] # mark a session closed — moves it to the (c) section
   tbe reopen <#|id>     # un-close
-  tbe resume <#|id> [-p "prompt"] [--stream] [--force]  # resume; -p = headless (agent-safe),
+  tbe resume <#|id> [--as <agent>] [-p "prompt"] [--stream] [--force]  # resume; -p = headless (agent-safe),
+                        #   the resumed claude acts as the session's own agent (its /hy
+                        #   identity) or --as, never as whoever ran tbe; none = no agent label,
                         #   --stream announces the session id on stderr the
                         #   moment claude starts, so `tbe watch <id>` can follow;
                         #   interactive resume refuses a session already live (--force)
@@ -414,6 +416,39 @@ def _resolve_session(key):
         print(msg); return None, None
     return os.path.basename(f)[:-6], scan(f)[0]
 
+IDENTITY_VAR = re.compile(r"ENVOAK_(AGENT_|IDENTITY_|TRUST_LEVEL|KNOWLEDGE_TREE_ID)")
+
+def identity_vars(sid):
+    """ENVOAK_* identity vars from session-identity/<sid>.env (`[export ]K="v"` lines)."""
+    try:
+        with open(os.path.join(SESSION_IDENTITY, f"{sid}.env")) as fh:
+            return {m.group(1): m.group(2) for m in
+                    re.finditer(r'^(?:export )?(ENVOAK_[A-Z_]+)="?([^"\n]*)"?$', fh.read(), re.M)
+                    if IDENTITY_VAR.match(m.group(1))}
+    except OSError:
+        return {}
+
+def resume_env(sid, as_label=None, env=None):
+    """(env, note) for the claude a resume starts. The resumed session acts as ITS OWN agent:
+    the label /hy pinned to it (session-identity/<sid>.env), or --as. Never the caller's: a
+    headless resume run by birdsan otherwise did a sherlock session's invoak work as birdsan
+    (tb-larr). No pinned identity and no --as: ENVOAK_AGENT_LABEL is removed, so invoak and
+    envoak refuse (NO_CREDENTIAL) instead of acting as whoever ran tbe. Not used either way:
+    the machine-global current-identity.env (last claim wins)."""
+    env = dict(os.environ if env is None else env)
+    caller, own = env.get("ENVOAK_AGENT_LABEL"), as_label or agent_of(sid)
+    for k in [k for k in env if IDENTITY_VAR.match(k)]:
+        del env[k]                    # the caller's key id / trust level go with its label
+    if own:
+        if not as_label:              # the session's whole pinned identity, not just its label
+            env.update(identity_vars(sid))
+        env["ENVOAK_AGENT_LABEL"] = own
+        note = f"acting as {own}" + (f" (not {caller}, who ran tbe)" if caller and caller != own else "")
+    else:
+        note = (f"session {sid[:8]} has no agent identity: running without one"
+                + (f" (not as {caller})" if caller else "") + "; pass --as <label> to set it")
+    return env, note
+
 def cmd_resume(rest):
     """tbe resume <#|id> [-p "prompt"] [--stream] — resume a session by number
     (from the last listing) or id prefix. With -p, runs `claude -p --resume`
@@ -422,11 +457,18 @@ def cmd_resume(rest):
     the moment claude starts, so `tbe watch <shortid>` can follow it live;
     stdout still carries only the final result text. Without -p, execs the
     interactive TUI exactly like the picker."""
-    # --force only before -p: everything after -p is the prompt, passed through untouched.
+    # --force / --as only before -p: everything after -p is the prompt, passed through untouched.
     pre = rest[:rest.index("-p")] if "-p" in rest else rest
     force = "--force" in pre
     if force:
         rest.remove("--force")
+    as_label = None
+    if "--as" in pre:
+        i = rest.index("--as")
+        as_label = rest[i + 1] if i + 1 < len(rest) else ""
+        if not re.fullmatch(r"[a-z][a-z0-9-]{1,40}", as_label):
+            print(f"--as needs an agent label, got {as_label!r}"); return 2
+        del rest[i:i + 2]
     prompt, stream = None, False
     if "--stream" in rest:
         stream = True; rest = [a for a in rest if a != "--stream"]
@@ -446,6 +488,8 @@ def cmd_resume(rest):
     if not cwd or not os.path.isdir(cwd):
         print(f"cwd missing: {cwd}"); return 2
     os.chdir(cwd)
+    env, note = resume_env(sid, as_label)
+    print(f"tbe: {note}", file=sys.stderr, flush=True)
     if prompt and stream:
         # stream-json: init event carries the session id, result event the
         # final text. Pinned live 2026-08-05: headless --resume does NOT fork —
@@ -455,7 +499,7 @@ def cmd_resume(rest):
         p = subprocess.Popen(
             ["claude", "-p", "--resume", sid, "--output-format", "stream-json",
              "--verbose", "--dangerously-skip-permissions", prompt],
-            stdout=subprocess.PIPE, text=True)
+            stdout=subprocess.PIPE, text=True, env=env)
         final = ""
         for line in p.stdout:
             try:
@@ -473,11 +517,11 @@ def cmd_resume(rest):
         return p.returncode
     if prompt:
         return subprocess.call(["claude", "-p", "--resume", sid,
-                                "--dangerously-skip-permissions", prompt])
+                                "--dangerously-skip-permissions", prompt], env=env)
     why = None if force else claim(sid)
     if why:
         print(why, file=sys.stderr); return 3
-    os.execvp("claude", ["claude", "--resume", sid, "--dangerously-skip-permissions"])
+    os.execvpe("claude", ["claude", "--resume", sid, "--dangerously-skip-permissions"], env)
 
 def cmd_watch(rest):
     """tbe watch <#|id> — follow a session's transcript live (tail -f style).
@@ -855,6 +899,26 @@ def _selftest():
         ["frozen (1)", "f", "B (1, 1 live)", "b1", "A (2)", "a2", "a1", "closed (1)", "c"], "picker order"
     assert picker_items([], [], [], grouped=False) == [], "empty listing has no headers"
     assert wrap("abcdefgh", 3, 2) == ["abc", "de…"], "preview wrap ellipsis"
+    # resume_env: the session's own label wins over the caller's; none pinned = no label, not the caller's
+    with tempfile.TemporaryDirectory() as d:
+        global SESSION_IDENTITY
+        saved, SESSION_IDENTITY = SESSION_IDENTITY, d
+        with open(os.path.join(d, "s1.env"), "w") as fh:
+            fh.write('export ENVOAK_AGENT_LABEL="sherlock"\nexport ENVOAK_AGENT_KEY_ID="k-sher"\nexport OTHER="no"\n')
+        caller = {"ENVOAK_AGENT_LABEL": "birdsan", "ENVOAK_AGENT_KEY_ID": "k-bird", "ENVOAK_TRUST_LEVEL": "friend", "X": "1"}
+        env, note = resume_env("s1", env=caller)
+        assert env["ENVOAK_AGENT_LABEL"] == "sherlock" and env["X"] == "1" and "not birdsan" in note, "own identity wins"
+        assert env["ENVOAK_AGENT_KEY_ID"] == "k-sher" and "ENVOAK_TRUST_LEVEL" not in env and "OTHER" not in env, \
+            "whole pinned identity replaces the caller's; nothing else from the file"
+        env, _ = resume_env("s2", env=caller)
+        assert not any(k.startswith("ENVOAK_AGENT") for k in env), "no identity: caller's key id dropped too"
+        env, note = resume_env("s2", env={"ENVOAK_AGENT_LABEL": "birdsan"})
+        assert "ENVOAK_AGENT_LABEL" not in env and "--as" in note, "no identity: caller's label dropped"
+        env, _ = resume_env("s2", "mycsan", env={"ENVOAK_AGENT_LABEL": "birdsan"})
+        assert env["ENVOAK_AGENT_LABEL"] == "mycsan", "--as sets it"
+        env, _ = resume_env("s1", "mycsan", env={})
+        assert env["ENVOAK_AGENT_LABEL"] == "mycsan", "--as overrides the pinned label"
+        SESSION_IDENTITY = saved
     print("selftest ok"); return
 
 def main():
@@ -1028,7 +1092,8 @@ def main():
             if why:
                 print(why); return 3
             os.chdir(r["cwd"])
-            os.execvp("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"])
+            env, note = resume_env(r["id"]); print(f"tbe: {note}", file=sys.stderr)
+            os.execvpe("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"], env)
         w_agent = agent_width(pinned_ids + body_rows + cbody)
         pinned = print_pinned(pinned_ids, ago, frozen, w_agent=w_agent)
         if grouped:
@@ -1090,7 +1155,8 @@ def main():
         if why:
             print(why); continue
         os.chdir(r["cwd"])
-        os.execvp("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"])
+        env, note = resume_env(r["id"]); print(f"tbe: {note}", file=sys.stderr)
+        os.execvpe("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"], env)
 
 if __name__ == "__main__":
     sys.exit(main() or 0)
