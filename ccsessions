@@ -25,7 +25,7 @@ clears), m = next 100 sessions, c = toggle closed section. Piped or run by an ag
 Search covers the whole transcript (conversation, tool I/O, subagents) plus id, folder,
 branch, agent and notes; <system-reminder> text is ignored.
 """
-import os, sys, json, glob, subprocess, time, re, fcntl, shutil
+import os, sys, json, glob, subprocess, time, re, fcntl, shutil, io
 from collections import Counter
 from datetime import datetime
 
@@ -116,7 +116,7 @@ def scan(path):
     except Exception:
         pass
     tldr = summary or first_user or "(no preview)"
-    return cwd, " ".join(tldr.split()), last_doing(path), started
+    return cwd, redact(" ".join(tldr.split())), redact(last_doing(path)), started  # every printed field is masked
 
 def last_paragraph(t):
     """Final paragraph of a message — the conclusion/next-step, which is what you
@@ -212,7 +212,9 @@ def search_session(paths, terms, meta=""):
         meta += " " + " ".join(set(re.findall(r'"gitBranch":\s*"([^"]*)"', blob.decode("utf-8", "ignore"))))
         if not any(t in blob.lower() for t in tb):
             continue
-        for raw in blob.splitlines():                 # one line at a time: a common word keeps no list
+        # ponytail: whole file in memory (largest seen 15 MB) for the fast prefilter; lines
+        # are iterated, not listed. Stream from disk if transcripts reach hundreds of MB.
+        for raw in io.BytesIO(blob):
             if not any(t in raw.lower() for t in tb): continue
             try:
                 d = json.loads(raw)
@@ -686,6 +688,13 @@ def _selftest():
         out = snippet("ran it: " + leak + " done", "ran")
         assert "‹redacted›" in out and leak[-6:] not in out, f"secret masked: {leak[:12]}"
     assert snippet("fix the flock bug", "flock") == "fix the flock bug", "plain text untouched"
+    with tempfile.TemporaryDirectory() as d:     # tldr/doing reach --json too, so scan() masks them
+        f = os.path.join(d, "s.jsonl")
+        with open(f, "w") as fh:
+            fh.write(json.dumps({"type": "user", "cwd": d, "timestamp": "t", "message": {"role": "user",
+                     "content": "use OPENAI_API_KEY=sk-test0123456789abcdefXYZ"}}))
+        _, tldr, doing, _ = scan(f)
+        assert "abcdefXYZ" not in tldr + doing and "‹redacted›" in tldr, "preview fields masked"
     print("selftest ok"); return
 
 def main():
@@ -846,7 +855,7 @@ def main():
         save_json(LAST, [{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"]}
                          for i, r in enumerate(ordered, 1)])
 
-        if not sys.stdin.isatty():
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return                  # piped / agent: print the listing, never prompt
         tag = f" \033[33m/{filt}\033[0m" if filt else ""
         try:
