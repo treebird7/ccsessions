@@ -19,7 +19,7 @@ Usage:
                         #   interactive resume refuses a session already live (--force)
   tbe watch <#|id>      # follow a session's transcript live (headless runs too)
 
-In a terminal, tbe opens an arrow-key picker: ↑↓/jk move (PgUp/PgDn, g/G), Enter
+In a terminal, tbe (and ccsessions) opens an arrow-key picker: ↑↓/jk move (PgUp/PgDn, g/G), Enter
 resumes, / searches, c toggles closed, m loads 100 more, f/x toggle freeze/close on
 the row, q quits; the lower pane previews the session's last messages. --plain (or
 CCSESSIONS_PLAIN=1) keeps the numbered prompt below.
@@ -983,7 +983,7 @@ def main():
             r["started_local"] = when(r.get("started"))
         print(json.dumps(all_rows, indent=2)); return
 
-    if not rows and not frozen:
+    if not rows and not frozen and not closed:     # all-closed still opens: `c` shows them
         print("No sessions found."); return
 
     show_closed = False
