@@ -591,7 +591,8 @@ def print_grouped(rows, ago, start=0, w_agent=0):
     return out
 
 def print_ranked(cands, top, as_json, ago, frozen, closed):
-    """`tbe search`: best matches first, never prompts. Score is capped so that among
+    """`tbe search`: best matches first, never prompts. --json carries no tldr/doing: agents get
+    session facts plus the one masked hit, not free transcript text (masking is best effort). Score is capped so that among
     strong matches the newest wins. Exit 1 when nothing matched (agent-friendly)."""
     seen, rows = set(), []
     for r in sorted(cands, key=lambda r: (min(r.get("score", 0), 30), r["mtime"]), reverse=True):
@@ -603,8 +604,7 @@ def print_ranked(cands, top, as_json, ago, frozen, closed):
         print(json.dumps([{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"], "agent": r["agent"],
                            "live": r["live"], "frozen": r["id"] in frozen, "closed": r["id"] in closed,
                            "ago": ago(r["mtime"]), "started_local": when(r.get("started")),
-                           "score": r.get("score", 0), "hit": r.get("hit", ""), "tldr": r["tldr"],
-                           "doing": r["doing"], "file": r["file"]}
+                           "score": r.get("score", 0), "hit": r.get("hit", ""), "file": r["file"]}
                           for i, r in enumerate(rows, 1)], indent=2, ensure_ascii=False))
         return 0 if rows else 1
     if not rows:
