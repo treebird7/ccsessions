@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added (picker)
+- **Arrow-key picker.** In a terminal `tbe` now opens a curses list (stdlib, no dependency): ↑↓/jk/PgUp/PgDn/g/G to move, Enter to resume (same single-writer claim), `/` to search, `c` closed, `m` more, `f`/`x` toggle freeze/close in place, `q` quit. The lower pane previews the selected session — project, id, agent, start, state, folder, the search hit, and its last messages, secrets masked. `--plain` or `CCSESSIONS_PLAIN=1` keeps the numbered prompt; piped or agent runs are unchanged (print once, no prompt).
+
 ### Added (search)
 - **Full-text search.** The filter (`tbe foo bar`, `/foo` or `s` at the prompt) now reads the whole transcript — conversation, tool calls and output, subagent transcripts — plus session id, folder, branch, agent and freeze/close notes. Every word must match. It used to see only the first message and the last 200 characters, so `tbe-locks` found 0 of the 1 session that discussed it. Injected `<system-reminder>` text is ignored. Rows show the newest matching line instead of the generic preview.
 - **`tbe search <words…> [--json] [-n N]`**: ranked results (conversation hits ×3, tool ×1, newest first among strong matches), includes closed sessions, never prompts, exit 1 on no match. `--json` carries `id`, `cwd`, `score`, `hit`, `file` and no `tldr`/`doing`, so an agent sees only the one masked matching line of transcript text. Excludes the calling session (`$CLAUDE_CODE_SESSION_ID`), so an agent doesn't find its own query. Snippets mask credential shapes (`sk-`, `sb_secret_`, `ghp_`, JWTs, `evk1_`, private-key headers, 40+ hex, `KEY=value`) before printing, since they can come from tool output and land in an agent's context.

@@ -58,7 +58,11 @@ tbe search flock lock # ranked full-text search, never prompts (--json, -n N)
   Injected `<system-reminder>` text (CLAUDE.md, memory) doesn't count, or one word in CLAUDE.md
   would match every session. Each row shows the newest matching line. `tbe search` ranks
   conversation hits above tool hits, newest first among strong matches, and exits 1 on no match.
-- **At the prompt**: a number or a short id (`a28`) resumes, `/words` searches, `m` loads more,
+- **Picker**: in a terminal, `tbe` and `ccsessions` open an arrow-key list with a preview of the selected
+  session's last messages (secrets masked). ↑↓/jk move, Enter resumes, `/` searches, `c` shows
+  closed, `m` loads more, `f`/`x` toggle freeze/close, `q` quits. `--plain` or
+  `CCSESSIONS_PLAIN=1` gives the numbered prompt instead.
+- **Numbered prompt** (`--plain`): a number or a short id (`a28`) resumes, `/words` searches, `m` loads more,
   `c` shows closed sessions. Piped or run by an agent, `tbe` prints once without colour and
   never prompts.
 

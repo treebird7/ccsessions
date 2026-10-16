@@ -19,7 +19,11 @@ Usage:
                         #   interactive resume refuses a session already live (--force)
   tbe watch <#|id>      # follow a session's transcript live (headless runs too)
 
-Interactive keys: number or short id = resume, /words = search (s prompts; empty
+In a terminal, tbe (and ccsessions) opens an arrow-key picker: ↑↓/jk move (PgUp/PgDn, g/G), Enter
+resumes, / searches, c toggles closed, m loads 100 more, f/x toggle freeze/close on
+the row, q quits; the lower pane previews the session's last messages. --plain (or
+CCSESSIONS_PLAIN=1) keeps the numbered prompt below.
+Numbered prompt keys: number or short id = resume, /words = search (s prompts; empty
 clears), m = next 100 sessions, c = toggle closed section. Piped or run by an agent
 (stdin not a terminal), tbe prints once, without colour, and never prompts.
 Search covers the whole transcript (conversation, tool I/O, subagents) plus id, folder,
@@ -568,17 +572,22 @@ def print_pinned(rows, ago, frozen, start=0, w_agent=0):
     print()
     return out
 
-def print_grouped(rows, ago, start=0, w_agent=0):
-    """Cockpit view: sessions bucketed by project, freshest project first.
-    Returns rows in printed order so resume-by-number still lines up."""
+def group_rows(rows):
+    """[(project, rows newest first)], freshest project first — the cockpit order."""
     groups = {}
     for r in rows:
         groups.setdefault(r["proj"] or "?", []).append(r)
     order = sorted(groups, key=lambda p: max(x["mtime"] for x in groups[p]), reverse=True)
+    return [(p, sorted(groups[p], key=lambda x: x["mtime"], reverse=True)) for p in order]
+
+def print_grouped(rows, ago, start=0, w_agent=0):
+    """Cockpit view: sessions bucketed by project, freshest project first.
+    Returns rows in printed order so resume-by-number still lines up."""
+    gs = group_rows(rows)
+    order = [p for p, _ in gs]
     out, i = [], start
     print()
-    for proj in order:
-        g = sorted(groups[proj], key=lambda x: x["mtime"], reverse=True)
+    for proj, g in gs:
         n_live = sum(1 for x in g if x["live"])
         flag = f" \033[32m{n_live} live\033[0m" if n_live else ""
         print(f"\033[1;36m{proj}\033[0m  \033[2m({len(g)}){flag}\033[0m")
@@ -617,6 +626,146 @@ def print_ranked(cands, top, as_json, ago, frozen, closed):
                   f"{meta(r, w_agent)}  ", r.get("hit") or line_of(r)))
     print(f"\n  {len(rows)} best of {len(seen)} matching — `tbe resume <#>` to open, -n for more")
     return 0
+
+def recent(path, n=6, nbytes=262144):
+    """Last n meaningful (role, text) messages, secrets masked — the picker's preview."""
+    try:
+        sz = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if sz > nbytes:
+                fh.seek(-nbytes, os.SEEK_END); fh.readline()
+            lines = fh.read().decode("utf-8", "ignore").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in reversed(lines):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("type") in ("user", "assistant"):
+            t = REMINDER.sub(" ", text_of((d.get("message") or {}).get("content"))).strip()
+            if t and not noisy(t):
+                out.append((d["type"], redact(" ".join(t.split()))))
+                if len(out) == n: break
+    return out[::-1]
+
+def picker_items(pinned, body, cbody, grouped):
+    """Flat picker list: ("h", header) rows are skipped by the cursor, ("r", row) are sessions."""
+    items = []
+    if pinned:
+        items += [("h", f"frozen ({len(pinned)})")] + [("r", r) for r in pinned]
+    if grouped:
+        for proj, g in group_rows(body):
+            live = sum(1 for r in g if r["live"])
+            items += [("h", f"{proj} ({len(g)}{f', {live} live' if live else ''})")] + [("r", r) for r in g]
+    elif body:
+        items += [("h", f"recent ({len(body)})")] + [("r", r) for r in body]
+    if cbody:
+        items += [("h", f"closed ({len(cbody)})")] + [("r", r) for r in cbody]
+    return items
+
+def wrap(text, width, lines):
+    """text cut into at most `lines` lines of `width` chars."""
+    out = [text[i:i + width] for i in range(0, len(text), width)][:lines]
+    if len(text) > width * lines and out: out[-1] = out[-1][:-1] + "…"
+    return out
+
+def run_picker(items, ago, frozen, closed, filt, show_closed, at_id=None):
+    """Arrow-key picker (stdlib curses). Returns (action, payload): ("resume", row),
+    ("search", words), ("closed", None), ("more", None), ("mark", (path, row)), ("quit", None)."""
+    import curses
+    sel = [i for i, (k, _) in enumerate(items) if k == "r"]
+    cache = {}
+
+    def draw(scr, cur, top):
+        scr.erase()
+        h, w = scr.getmaxyx()
+        prev_h = max(min(14, h // 2), 6)
+        list_h = h - prev_h - 2
+        title = f" tbe  {len(sel)} sessions" + (f"   /{filt}" if filt else "") + ("   +closed" if show_closed else "")
+        scr.addnstr(0, 0, title.ljust(w), w - 1, curses.A_REVERSE)
+        for y, (k, v) in enumerate(items[top:top + list_h], 1):
+            i = top + y - 1
+            if k == "h":
+                scr.addnstr(y, 0, v, w - 1, curses.color_pair(2) | curses.A_BOLD); continue
+            mark = "●" if v["live"] else ("*" if v["id"] in frozen else " ")
+            line = f" {mark} {ago(v['mtime']):>4}  {v['id'][:3]}  {(v.get('agent') or '')[:12]:<12} {line_of(v)}"
+            attr = curses.A_REVERSE if i == cur else (curses.color_pair(1) if v["live"] else 0)
+            scr.addnstr(y, 0, line.ljust(w), w - 1, attr)
+        if not sel:
+            scr.addnstr(2, 1, "no session matches — / to search again, empty search clears", w - 2, curses.A_DIM)
+        r = items[cur][1] if sel else None
+        y0 = list_h + 1
+        scr.addnstr(y0, 0, "─" * w, w - 1, curses.A_DIM)
+        if r:
+            state = ", ".join(x for x, on in (("live", r["live"]), ("frozen", r["id"] in frozen),
+                                              ("closed", r["id"] in closed)) if on)
+            head = f" {r['proj']}  ·  {r['id'][:8]}  ·  {r.get('agent') or 'no agent'}  ·  started {when(r.get('started'))}" \
+                   + (f"  ·  {state}" if state else "")
+            scr.addnstr(y0 + 1, 0, head, w - 1, curses.A_BOLD)
+            scr.addnstr(y0 + 2, 0, f" {r['cwd'] or '?'}", w - 1, curses.A_DIM)
+            body = ([("match", r["hit"])] if r.get("hit") else []) + \
+                   cache.setdefault(r["id"], recent(r["file"]) if r.get("file") else [])
+            y = y0 + 3
+            lines = []
+            for who, t in body:
+                tag = {"user": "you ", "assistant": "cc  ", "match": "hit "}[who]
+                for j, l in enumerate(wrap(t, w - 6, 2)):
+                    lines.append(((tag if j == 0 else "    ") + " " + l, who))
+            for l, who in lines[-(h - 1 - y):] if h - 1 - y > 0 else []:
+                scr.addnstr(y, 1, l, w - 2, curses.color_pair(3) if who == "user" else
+                            (curses.color_pair(2) if who == "match" else 0))
+                y += 1
+        keys = " ↑↓ move  ⏎ resume  / search  c closed  m more  f freeze  x close  q quit "
+        scr.addnstr(h - 1, 0, keys.ljust(w), w - 1, curses.A_REVERSE)
+        scr.refresh()
+
+    def prompt(scr, label):
+        h, w = scr.getmaxyx()
+        scr.addnstr(h - 1, 0, label.ljust(w), w - 1, curses.A_REVERSE)
+        curses.echo(); curses.curs_set(1)
+        try:
+            return scr.getstr(h - 1, len(label), 200).decode("utf-8", "ignore")
+        except Exception:
+            return None
+        finally:
+            curses.noecho(); curses.curs_set(0)
+
+    def loop(scr):
+        curses.curs_set(0); curses.use_default_colors()
+        for n, c in ((1, curses.COLOR_GREEN), (2, curses.COLOR_CYAN), (3, curses.COLOR_YELLOW)):
+            curses.init_pair(n, c, -1)
+        pos = next((j for j, i in enumerate(sel) if items[i][1]["id"] == at_id), 0)
+        top = 0
+        while True:
+            h = scr.getmaxyx()[0]
+            list_h = max(h - max(min(14, h // 2), 6) - 2, 1)
+            cur = sel[pos] if sel else 0
+            if cur < top + 1: top = max(cur - 1, 0)       # keep the section header in view
+            if cur >= top + list_h: top = cur - list_h + 1
+            draw(scr, cur, top)
+            k = scr.getch()
+            if k in (curses.KEY_DOWN, ord("j")): pos = min(pos + 1, len(sel) - 1)
+            elif k in (curses.KEY_UP, ord("k")): pos = max(pos - 1, 0)
+            elif k == curses.KEY_NPAGE: pos = min(pos + list_h, len(sel) - 1)
+            elif k == curses.KEY_PPAGE: pos = max(pos - list_h, 0)
+            elif k in (curses.KEY_HOME, ord("g")): pos = 0
+            elif k in (curses.KEY_END, ord("G")): pos = len(sel) - 1
+            elif k in (10, 13, curses.KEY_ENTER) and sel: return "resume", items[cur][1]
+            elif k == ord("/"):
+                q = prompt(scr, " search words (empty = clear): ")
+                if q is not None: return "search", q
+            elif k == ord("c"): return "closed", None
+            elif k == ord("m"): return "more", None
+            elif k in (ord("f"), ord("x")) and sel:
+                return "mark", (FROZEN if k == ord("f") else CLOSED, items[cur][1])
+            elif k in (ord("q"), 27): return "quit", None
+            elif k == curses.KEY_RESIZE: pass
+    try:
+        return curses.wrapper(loop)
+    except KeyboardInterrupt:
+        return "quit", None
 
 def _selftest():
     # the two load-bearing bits of running_sessions(): --resume id capture + cwd→projdir encoding
@@ -698,6 +847,14 @@ def _selftest():
                      "content": "use OPENAI_API_KEY=sk-test0123456789abcdefXYZ"}}))
         _, tldr, doing, _ = scan(f)
         assert "abcdefXYZ" not in tldr + doing and "‹redacted›" in tldr, "preview fields masked"
+    # picker list: frozen first, projects freshest-first with live counts, closed last; headers aren't rows
+    R = lambda i, proj, m, live=False: {"id": i, "proj": proj, "mtime": m, "live": live}
+    items = picker_items([R("f", "A", 1)], [R("a1", "A", 5), R("b1", "B", 9, True), R("a2", "A", 7)],
+                         [R("c", "C", 3)], grouped=True)
+    assert [v if k == "h" else v["id"] for k, v in items] == \
+        ["frozen (1)", "f", "B (1, 1 live)", "b1", "A (2)", "a2", "a1", "closed (1)", "c"], "picker order"
+    assert picker_items([], [], [], grouped=False) == [], "empty listing has no headers"
+    assert wrap("abcdefgh", 3, 2) == ["abc", "de…"], "preview wrap ellipsis"
     print("selftest ok"); return
 
 def main():
@@ -716,7 +873,7 @@ def main():
     as_json = "--json" in args; args = [a for a in args if a != "--json"]
     # Invoked as `tbe` (TreeBirdsEye) → grouped cockpit by default.
     grouped = "-g" in args or os.path.basename(sys.argv[0]).startswith("tbe")
-    args = [a for a in args if a != "-g"]
+    args = [a for a in args if a not in ("-g", "--plain")]   # --plain: numbered prompt, no picker
     if as_json: limit = 10**9
     if "-a" in args: limit = 10**9; args.remove("-a")
     top = 20
@@ -826,14 +983,52 @@ def main():
             r["started_local"] = when(r.get("started"))
         print(json.dumps(all_rows, indent=2)); return
 
-    if not rows and not frozen:
+    if not rows and not frozen and not closed:     # all-closed still opens: `c` shows them
         print("No sessions found."); return
 
     show_closed = False
+    use_picker = (sys.stdin.isatty() and sys.stdout.isatty() and "--plain" not in sys.argv[1:]
+                  and not os.environ.get("CCSESSIONS_PLAIN") and os.environ.get("TERM") != "dumb")
+    at_id = None
     while True:
         pinned_ids = pinned_rows()
         body_rows = [r for r in rows if r["id"] not in frozen]
         cbody = closed_rows() if show_closed else []
+        if use_picker:
+            items = picker_items(pinned_ids, body_rows, cbody, grouped)
+            save_json(LAST, [{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"]}
+                             for i, r in enumerate((v for k, v in items if k == "r"), 1)])
+            act, arg = run_picker(items, ago, frozen, closed, filt, show_closed, at_id)
+            if act == "quit":
+                return
+            if act == "more":
+                take(100); continue
+            if act == "closed":
+                show_closed = not show_closed; continue
+            if act == "search":
+                filt = arg.strip().lower() or None
+                rows[:] = []; fiter = iter(files); take(limit); at_id = None
+                continue
+            if act == "mark":                 # f / x toggle freeze / close on the row
+                path, r = arg
+                marks = load_json(path, {})
+                if marks.pop(r["id"], None) is None:
+                    marks[r["id"]] = {"note": "", "at": time.time(), "proj": r["proj"]}
+                save_json(path, marks)
+                (frozen if path == FROZEN else closed).clear()
+                (frozen if path == FROZEN else closed).update(marks)
+                at_id = r["id"]
+                if path == CLOSED:            # take() skips closed sessions: rescan
+                    rows[:] = []; fiter = iter(files); take(limit)
+                continue
+            r = arg                           # resume
+            if not r["cwd"] or not os.path.isdir(r["cwd"]):
+                print(f"cwd missing: {r['cwd']}"); return 1
+            why = claim(r["id"])
+            if why:
+                print(why); return 3
+            os.chdir(r["cwd"])
+            os.execvp("claude", ["claude", "--resume", r["id"], "--dangerously-skip-permissions"])
         w_agent = agent_width(pinned_ids + body_rows + cbody)
         pinned = print_pinned(pinned_ids, ago, frozen, w_agent=w_agent)
         if grouped:
