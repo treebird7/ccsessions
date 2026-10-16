@@ -416,6 +416,7 @@ def _resolve_session(key):
         print(msg); return None, None
     return os.path.basename(f)[:-6], scan(f)[0]
 
+CALLER_ONLY = ("ENVOAK_", "INVOAK_")   # every envoak/invoak var is the caller's, never the session's
 IDENTITY_VAR = re.compile(r"ENVOAK_(AGENT_|IDENTITY_|TRUST_LEVEL|KNOWLEDGE_TREE_ID)")
 
 def identity_vars(sid):
@@ -434,11 +435,15 @@ def resume_env(sid, as_label=None, env=None):
     headless resume run by birdsan otherwise did a sherlock session's invoak work as birdsan
     (tb-larr). No pinned identity and no --as: ENVOAK_AGENT_LABEL is removed, so invoak and
     envoak refuse (NO_CREDENTIAL) instead of acting as whoever ran tbe. Not used either way:
-    the machine-global current-identity.env (last claim wins)."""
+    the machine-global current-identity.env (last claim wins). All ENVOAK_*/INVOAK_* vars are
+    dropped, not just identity: the master password or a token is the caller's too. envoak
+    reads its vault URL from ~/.envoak/config.json when the env var is gone.
+    ponytail: prefix denylist, not an allowlist; other secrets in the caller's shell pass on."""
     env = dict(os.environ if env is None else env)
     caller, own = env.get("ENVOAK_AGENT_LABEL"), as_label or agent_of(sid)
-    for k in [k for k in env if IDENTITY_VAR.match(k)]:
-        del env[k]                    # the caller's key id / trust level go with its label
+    for k in [k for k in env if k.startswith(CALLER_ONLY)]:
+        del env[k]                    # the caller's identity, master password, tokens, hive session
+
     if own:
         if not as_label:              # the session's whole pinned identity, not just its label
             env.update(identity_vars(sid))
@@ -905,7 +910,12 @@ def _selftest():
         saved, SESSION_IDENTITY = SESSION_IDENTITY, d
         with open(os.path.join(d, "s1.env"), "w") as fh:
             fh.write('export ENVOAK_AGENT_LABEL="sherlock"\nexport ENVOAK_AGENT_KEY_ID="k-sher"\nexport OTHER="no"\n')
-        caller = {"ENVOAK_AGENT_LABEL": "birdsan", "ENVOAK_AGENT_KEY_ID": "k-bird", "ENVOAK_TRUST_LEVEL": "friend", "X": "1"}
+        caller = {"ENVOAK_AGENT_LABEL": "birdsan", "ENVOAK_AGENT_KEY_ID": "k-bird", "ENVOAK_TRUST_LEVEL": "friend", "X": "1",
+                  "ENVOAK_MASTER_PASSWORD": "pw", "INVOAK_TOKEN": "tok", "ENVOAK_COLONY_SESSION": "term-1"}
+        for sid, lab in (("s1", None), ("s2", None), ("s2", "mycsan")):
+            env, _ = resume_env(sid, lab, env=caller)
+            assert not {"ENVOAK_MASTER_PASSWORD", "INVOAK_TOKEN", "ENVOAK_COLONY_SESSION"} & set(env), \
+                f"caller secrets never reach the resumed claude ({sid}, {lab})"
         env, note = resume_env("s1", env=caller)
         assert env["ENVOAK_AGENT_LABEL"] == "sherlock" and env["X"] == "1" and "not birdsan" in note, "own identity wins"
         assert env["ENVOAK_AGENT_KEY_ID"] == "k-sher" and "ENVOAK_TRUST_LEVEL" not in env and "OTHER" not in env, \
