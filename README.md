@@ -49,8 +49,18 @@ ln -s ~/.local/bin/ccsessions ~/.local/bin/tbe
 ccsessions            # 30 most-recent sessions; type a number to resume
 ccsessions -n 60      # show more
 ccsessions -a         # show all
-ccsessions ibn        # filter by project or preview text
+ccsessions ibn        # filter: sessions whose transcript contains every word
+tbe search flock lock # ranked full-text search, never prompts (--json, -n N)
 ```
+
+- **Search** reads every transcript (conversation, tool calls and output, subagents) plus the
+  session id, folder, branch, agent and freeze/close notes. All words must match, case-insensitive.
+  Injected `<system-reminder>` text (CLAUDE.md, memory) doesn't count, or one word in CLAUDE.md
+  would match every session. Each row shows the newest matching line. `tbe search` ranks
+  conversation hits above tool hits, newest first among strong matches, and exits 1 on no match.
+- **At the prompt**: a number or a short id (`a28`) resumes, `/words` searches, `m` loads more,
+  `c` shows closed sessions. Piped or run by an agent, `tbe` prints once without colour and
+  never prompts.
 
 - **● green dot** = a `claude` process is currently running in that project's directory.
 - **agent + start columns** = the agent label pinned to that session (envoak/dawn users; the

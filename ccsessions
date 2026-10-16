@@ -5,7 +5,8 @@ Usage:
   ccsessions            # 100 most-recent sessions (set CCSESSIONS_LIMIT to change)
   ccsessions -n 200     # show a custom count
   ccsessions -a         # show all
-  ccsessions foo        # filter by project/tldr substring
+  ccsessions foo bar    # filter: transcripts containing every word
+  tbe search <words…> [--json] [-n N]  # ranked full-text search; never prompts; exit 1 = no match
   ccsessions -g         # group by project (cockpit view)
   ccsessions --json     # machine-readable dump (for birdsan orchestration)
   tbe freeze [N] [note] # pin a session for later (no N = current session)
@@ -18,10 +19,13 @@ Usage:
                         #   interactive resume refuses a session already live (--force)
   tbe watch <#|id>      # follow a session's transcript live (headless runs too)
 
-Interactive keys: number = resume, m = next 100 sessions, c = toggle closed
-section, s = search (project/tldr/doing/agent substring; empty query clears).
+Interactive keys: number or short id = resume, /words = search (s prompts; empty
+clears), m = next 100 sessions, c = toggle closed section. Piped or run by an agent
+(stdin not a terminal), tbe prints once, without colour, and never prompts.
+Search covers the whole transcript (conversation, tool I/O, subagents) plus id, folder,
+branch, agent and notes; <system-reminder> text is ignored.
 """
-import os, sys, json, glob, subprocess, time, re, fcntl
+import os, sys, json, glob, subprocess, time, re, fcntl, shutil
 from collections import Counter
 from datetime import datetime
 
@@ -107,7 +111,7 @@ def scan(path):
                         t = text_of(msg.get("content")).strip()
                         if t and not noisy(t):
                             first_user = t
-                if cwd and summary and started:
+                if cwd and (summary or first_user) and started:
                     break
     except Exception:
         pass
@@ -144,6 +148,79 @@ def last_doing(path, nbytes=65536):
             if t and not noisy(t):
                 return " ".join(last_paragraph(t).split())[:200]
     return ""
+
+REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+ANSI = re.compile(r"\033\[[0-9;]*m")
+
+def texts_of(d):
+    """(weight, text) for one transcript line: conversation 3, tool input/output 1.
+    Injected <system-reminder> blocks (CLAUDE.md, memory) are stripped — they are in
+    nearly every transcript, so a word in CLAUDE.md would otherwise match them all."""
+    out = []
+    if d.get("type") == "summary":
+        out.append((3, d.get("summary") or ""))
+    elif d.get("type") in ("user", "assistant"):
+        c = (d.get("message") or {}).get("content")
+        if isinstance(c, str):
+            out.append((3, c))
+        for b in c if isinstance(c, list) else []:
+            if not isinstance(b, dict): continue
+            if b.get("type") == "text":
+                out.append((3, b.get("text") or ""))
+            elif b.get("type") == "tool_use":
+                out.append((1, json.dumps(b.get("input"), ensure_ascii=False)))
+            elif b.get("type") == "tool_result":
+                r = b.get("content")
+                out.append((1, r if isinstance(r, str) else
+                            " ".join(x.get("text") or "" for x in r or [] if isinstance(x, dict))))
+    return [(w, REMINDER.sub(" ", t)) for w, t in out if t]
+
+def snippet(text, term, width=110):
+    """~width chars of text centred on the first hit of term, whitespace collapsed."""
+    t = " ".join(text.split())
+    i = max(t.lower().find(term), 0)
+    a = max(0, i - width // 3)
+    return ("…" if a else "") + t[a:a + width] + ("…" if a + width < len(t) else "")
+
+def search_session(paths, terms, meta=""):
+    """Full-text match of one session (its transcript + subagent transcripts).
+    Every term must appear, case-insensitively, in conversation/tool text or in
+    meta (id, cwd, agent, branch, freeze/close notes). Returns (score, snippet) or
+    None. Score: conversation hits ×3, tool hits ×1; snippet is the newest
+    conversation hit, else the newest tool hit.
+    ponytail: full read per query (~0.4s warm for 700MB); index if it gets slow."""
+    tb = [t.encode() for t in terms]
+    lines = []
+    for p in paths:
+        try:
+            with open(p, "rb") as fh: blob = fh.read()
+        except OSError:
+            continue
+        low = blob.lower()
+        meta += " " + " ".join(set(re.findall(r'"gitBranch":\s*"([^"]*)"', blob.decode("utf-8", "ignore"))))
+        if any(t in low for t in tb):
+            lines += [(p != paths[0], l) for l in blob.splitlines() if any(t in l.lower() for t in tb)]
+    meta = meta.lower()
+    found, score, snip = {t for t in terms if t in meta}, 0, {}
+    for sub, raw in lines:
+        try:
+            d = json.loads(raw)
+        except Exception:
+            continue
+        for w, text in texts_of(d):
+            low = text.lower()
+            hit = [t for t in terms if t in low]
+            if not hit: continue
+            w = 1 if sub else w                       # subagent transcripts rank as tool output
+            found.update(hit); score += w * len(hit)
+            snip[w] = snippet(text, hit[0])          # last line wins = newest
+    if len(found) < len(terms):
+        return None
+    return score, snip.get(3) or snip.get(1) or ""
+
+def session_paths(f):
+    """The session's transcript plus its subagents' (<projdir>/<sid>/subagents/*.jsonl)."""
+    return [f] + sorted(glob.glob(os.path.join(f[:-6], "subagents", "*.jsonl")))
 
 def _proc_cwd(pid):
     try:
@@ -235,15 +312,15 @@ def find_file(sid):
          glob.glob(os.path.join(PROJECTS, "*", f"*{sid}*.jsonl")))
     return max(g, key=os.path.getmtime) if g else None
 
-def row_for(sid, live):
+def row_for(sid, live, f=None):
     """Build a row for a session id (may be older than the scan window)."""
-    f = find_file(sid)
+    f = f or find_file(sid)
     if not f:
         return None
     cwd, tldr, doing, started = scan(f)
     proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
     sid = os.path.basename(f)[:-6]
-    return {"id": sid, "cwd": cwd, "proj": proj, "tldr": tldr, "doing": doing,
+    return {"id": sid, "cwd": cwd, "proj": proj, "tldr": tldr, "doing": doing, "file": f,
             "mtime": os.path.getmtime(f), "live": sid in live,
             "started": started, "agent": agent_of(sid)}
 
@@ -431,6 +508,23 @@ def cmd_thaw(rest):   _unmark(FROZEN, rest, "thaw", "🫧", "thawed", "frozen")
 def cmd_closed(rest): _mark(CLOSED, rest, "closed", "🌙")
 def cmd_reopen(rest): _unmark(CLOSED, rest, "reopen", "🌤", "reopened", "closed")
 
+class _Plain:
+    """stdout without ANSI colour, for pipes and agents."""
+    def __init__(self, f): self.f = f
+    def write(self, t): return self.f.write(ANSI.sub("", t))
+    def __getattr__(self, k): return getattr(self.f, k)
+
+def fit(prefix, text):
+    """prefix + text cut to the terminal width (80 cols when not a terminal… but
+    then 200, since a pipe has no edge to wrap at)."""
+    cols = shutil.get_terminal_size((200, 24)).columns if sys.stdout.isatty() else 200
+    room = max(cols - len(ANSI.sub("", prefix)) - 1, 20)
+    return prefix + (text if len(text) <= room else text[:room - 1] + "…")
+
+def line_of(r):
+    """What a row shows: the search hit when there is one, else where it left off."""
+    return r.get("hit") or r["doing"] or r["tldr"]
+
 def meta(r, w_agent):
     """short-id + agent + session-start columns. The short id (first 3 chars of
     the session id) matches the statusline's #a28 and feeds `tbe resume a28`.
@@ -452,9 +546,9 @@ def print_pinned(rows, ago, frozen, start=0, w_agent=0):
     for r in rows:
         i += 1; out.append(r)
         dot = "\033[32m●\033[0m" if r["live"] else " "
-        note = frozen.get(r["id"], {}).get("note") or (r["doing"] or r["tldr"])
-        print(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  \033[35m{r['proj'][:14]:<14}\033[0m "
-              f"{meta(r, w_agent)}  {note[:44]}")
+        note = r.get("hit") or frozen.get(r["id"], {}).get("note") or line_of(r)
+        print(fit(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  \033[35m{r['proj'][:14]:<14}\033[0m "
+                  f"{meta(r, w_agent)}  ", note))
     print()
     return out
 
@@ -475,11 +569,38 @@ def print_grouped(rows, ago, start=0, w_agent=0):
         for r in g:
             i += 1; out.append(r)
             dot = "\033[32m●\033[0m" if r["live"] else " "
-            line = (r["doing"] or r["tldr"])[:58]
-            print(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  {meta(r, w_agent)}  {line}")
+            print(fit(f"  {dot} \033[1m{i:>3}\033[0m {ago(r['mtime']):>4}  {meta(r, w_agent)}  ", line_of(r)))
         print()
     print(f"  \033[32m●\033[0m = running   ({len(out)} sessions, {len(order)} projects)")
     return out
+
+def print_ranked(cands, top, as_json, ago, frozen, closed):
+    """`tbe search`: best matches first, never prompts. Score is capped so that among
+    strong matches the newest wins. Exit 1 when nothing matched (agent-friendly)."""
+    seen, rows = set(), []
+    for r in sorted(cands, key=lambda r: (min(r.get("score", 0), 30), r["mtime"]), reverse=True):
+        if r["id"] not in seen:
+            seen.add(r["id"]); rows.append(r)
+    rows = rows[:top]
+    save_json(LAST, [{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"]} for i, r in enumerate(rows, 1)])
+    if as_json:
+        print(json.dumps([{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"], "agent": r["agent"],
+                           "live": r["live"], "frozen": r["id"] in frozen, "closed": r["id"] in closed,
+                           "ago": ago(r["mtime"]), "started_local": when(r.get("started")),
+                           "score": r.get("score", 0), "hit": r.get("hit", ""), "tldr": r["tldr"],
+                           "doing": r["doing"], "file": r["file"]}
+                          for i, r in enumerate(rows, 1)], indent=2, ensure_ascii=False))
+        return 0 if rows else 1
+    if not rows:
+        print("no session matches"); return 1
+    w_agent = agent_width(rows)
+    print()
+    for i, r in enumerate(rows, 1):
+        dot = "\033[32m●\033[0m" if r["live"] else ("📌" if r["id"] in frozen else ("🌙" if r["id"] in closed else " "))
+        print(fit(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{(r['proj'] or '?')[:18]:<18}\033[0m {ago(r['mtime']):>4}  "
+                  f"{meta(r, w_agent)}  ", r.get("hit") or line_of(r)))
+    print(f"\n  {len(rows)} best of {len(seen)} matching — `tbe resume <#>` to open, -n for more")
+    return 0
 
 def _selftest():
     # the two load-bearing bits of running_sessions(): --resume id capture + cwd→projdir encoding
@@ -524,6 +645,28 @@ def _selftest():
         assert "lock held" in (claim(sid, reg, locks) or ""), "second claim refused while the first holds it"
         assert "not a session id" in (claim("/tmp/tbe-target", reg, locks) or ""), "path-shaped id refused"
         assert not os.path.exists("/tmp/tbe-target.lock"), "no lock file outside LOCKS"
+    # search: AND over terms, reminders don't count, meta counts, subagent hits rank as tool, snippet is text
+    with tempfile.TemporaryDirectory() as d:
+        main_f, sub_f = os.path.join(d, "s.jsonl"), os.path.join(d, "s", "subagents", "a.jsonl")
+        os.makedirs(os.path.dirname(sub_f))
+        line = lambda typ, c: json.dumps({"type": typ, "message": {"role": typ, "content": c}, "gitBranch": "artisan/x"})
+        with open(main_f, "w") as fh:
+            fh.write("\n".join([
+                line("user", "<system-reminder>prsan everywhere</system-reminder> fix the \"flock\" bug"),
+                line("assistant", [{"type": "tool_use", "input": {"command": "grep flock"}}]),
+                line("assistant", [{"type": "text", "text": "Done: flock now held across exec."}])]))
+        with open(sub_f, "w") as fh:
+            fh.write(line("assistant", [{"type": "text", "text": "subagent saw walrus"}]))
+        paths = session_paths(main_f)
+        assert paths == [main_f, sub_f], "subagent transcripts belong to the session"
+        score, snip = search_session(paths, ["flock"])
+        assert score == 3 + 1 + 3 and snip.startswith("Done: flock"), "weights + newest conversation snippet"
+        assert '\\"' not in search_session(paths, ["bug"])[1], "snippet is decoded text, not raw json"
+        assert search_session(paths, ["prsan"]) is None, "a word only in a system-reminder doesn't match"
+        assert search_session(paths, ["flock", "nowhere"]) is None, "all terms must match"
+        assert search_session(paths, ["flock", "artisan/x"]), "branch is searchable"
+        assert search_session(paths, ["flock", "mynote"], "id mynote") , "meta (id/notes) counts"
+        assert search_session(paths, ["walrus"])[0] == 1, "subagent hit ranks as tool output"
     print("selftest ok"); return
 
 def main():
@@ -535,6 +678,9 @@ def main():
     if args and args[0] == "reopen": return cmd_reopen(args[1:])
     if args and args[0] == "resume": return cmd_resume(args[1:])
     if args and args[0] == "watch":  return cmd_watch(args[1:])
+    if args and args[0] in ("-h", "--help", "help"): print(__doc__.strip()); return
+    ranked = bool(args) and args[0] in ("search", "find")
+    if ranked: args = args[1:]
     limit, filt = int(os.environ.get("CCSESSIONS_LIMIT", "100")), None
     as_json = "--json" in args; args = [a for a in args if a != "--json"]
     # Invoked as `tbe` (TreeBirdsEye) → grouped cockpit by default.
@@ -542,9 +688,15 @@ def main():
     args = [a for a in args if a != "-g"]
     if as_json: limit = 10**9
     if "-a" in args: limit = 10**9; args.remove("-a")
+    top = 20
     if "-n" in args:
-        i = args.index("-n"); limit = int(args[i+1]); del args[i:i+2]
-    if args: filt = args[0].lower()
+        i = args.index("-n"); limit = top = int(args[i+1]); del args[i:i+2]
+    if ranked: limit = 10**9            # rank every session, then cut to -n (default 20)
+    filt = " ".join(args).lower() or None   # all words must match (AND)
+    if ranked and not filt:
+        print("usage: tbe search <words…> [--json] [-n N]"); return 2
+    if not sys.stdout.isatty() and not as_json:
+        sys.stdout = _Plain(sys.stdout)     # piped / agent: no colour codes
 
     files = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
     files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
@@ -552,6 +704,30 @@ def main():
     frozen = load_json(FROZEN, {})
     closed = load_json(CLOSED, {})
     live = running_sessions()
+
+    me = os.environ.get("CLAUDE_CODE_SESSION_ID")   # an agent searching shouldn't find itself
+
+    def hit(sid, f):
+        """None = no match. No query matches everything ({}); otherwise the full-text
+        score + snippet. Runs BEFORE the row is built, so misses cost one file read."""
+        if not filt:
+            return {}
+        if sid == me:
+            return None
+        notes = " ".join((m.get(sid) or {}).get("note") or "" for m in (frozen, closed))
+        # the project dir name is the cwd with / → -, close enough to match a path word
+        res = search_session(session_paths(f), filt.split(),
+                             " ".join([sid, os.path.basename(os.path.dirname(f)), agent_of(sid), notes]))
+        return {"score": res[0], "hit": res[1]} if res else None
+
+    by_id = {os.path.basename(f)[:-6]: f for f in files}
+
+    def marked_row(sid):
+        """Row for a frozen/closed session by id, or None if gone or not a match.
+        Matched first, from the listing's own file map: a glob per id took seconds."""
+        f = by_id.get(sid)
+        h = hit(sid, f) if f else None
+        return {**row_for(sid, live, f), **h} if h is not None else None
     rows, fiter = [], iter(files)
 
     def take(k):
@@ -563,16 +739,10 @@ def main():
             sid = os.path.basename(f)[:-6]
             if sid in closed and sid not in frozen:
                 continue
-            cwd, tldr, doing, started = scan(f)
-            proj = os.path.basename(cwd) if cwd else os.path.basename(os.path.dirname(f))
-            agent = agent_of(sid)
-            if filt and not any(filt in s.lower() for s in (proj, tldr, doing, agent)):
+            h = hit(sid, f)
+            if h is None:
                 continue
-            rows.append({
-                "id": sid, "cwd": cwd, "proj": proj, "tldr": tldr,
-                "doing": doing, "mtime": os.path.getmtime(f), "live": sid in live,
-                "started": started, "agent": agent,
-            })
+            rows.append({**row_for(sid, live, f), **h})
             k -= 1
 
     take(limit)
@@ -591,13 +761,10 @@ def main():
         for sid, mark in closed.items():
             if sid in frozen:
                 continue
-            r = row_for(sid, live)
+            r = marked_row(sid)
             if r:
                 if mark.get("note"):
                     r["doing"] = mark["note"]
-                if filt and not any(filt in (r.get(k) or "").lower()
-                                    for k in ("proj", "tldr", "doing", "agent")):
-                    continue
                 out.append(r)
         out.sort(key=lambda r: r["mtime"], reverse=True)
         return out
@@ -608,10 +775,13 @@ def main():
         have = {r["id"] for r in out}
         for sid in frozen:
             if sid not in have:
-                r = row_for(sid, live)
+                r = marked_row(sid)
                 if r: out.append(r)
         out.sort(key=lambda r: frozen.get(r["id"], {}).get("at", 0), reverse=True)
         return out
+
+    if ranked:
+        return print_ranked(rows + closed_rows(), top, as_json, ago, frozen, closed)
 
     if as_json:
         pinned = pinned_rows()
@@ -644,9 +814,8 @@ def main():
                 body.append(r)
                 dot = "\033[32m●\033[0m" if r["live"] else " "
                 proj = (r["proj"] or "?")[:22]
-                line = (r["doing"] or r["tldr"])[:64]
-                print(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  "
-                      f"{meta(r, w_agent)}  {line}")
+                print(fit(f" {dot} \033[1m{i:>3}\033[0m  \033[36m{proj:<22}\033[0m {ago(r['mtime']):>4}  "
+                          f"{meta(r, w_agent)}  ", line_of(r)))
             print(f"\n  \033[32m●\033[0m = running   ({len(body)} shown)")
         ordered = pinned + body
         if show_closed:
@@ -658,9 +827,11 @@ def main():
         save_json(LAST, [{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"]}
                          for i, r in enumerate(ordered, 1)])
 
+        if not sys.stdin.isatty():
+            return                  # piped / agent: print the listing, never prompt
         tag = f" \033[33m/{filt}\033[0m" if filt else ""
         try:
-            pick = input(f"\nResume #{tag}  (m=+100 more, c=closed, s=search, Enter=quit): ").strip()
+            pick = input(f"\nResume # or id{tag}  (/words=search, m=+100 more, c=closed, Enter=quit): ").strip()
         except (EOFError, KeyboardInterrupt):
             print(); return
         if not pick:
@@ -669,20 +840,24 @@ def main():
             take(100); continue
         if pick.lower() == "c":
             show_closed = not show_closed; continue
-        if pick.lower() == "s":
-            try:
-                q = input("search (empty=clear): ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print(); return
-            filt = q or None
+        if pick.lower() == "s" or pick.startswith("/"):
+            q = pick[1:]
+            if pick.lower() == "s":
+                try:
+                    q = input("search words (empty=clear): ")
+                except (EOFError, KeyboardInterrupt):
+                    print(); return
+            filt = q.strip().lower() or None
             rows[:] = []          # rescan from the top under the new filter
             fiter = iter(files)
             take(limit)
             continue
-        try:
-            r = ordered[int(pick) - 1]
-        except (ValueError, IndexError):
-            print("invalid"); continue
+        r = ordered[int(pick) - 1] if pick.isdigit() and 0 < int(pick) <= len(ordered) else None
+        if not r and re.fullmatch(r"[0-9a-fA-F-]{3,36}", pick):      # short id, as the statusline shows it
+            f = find_file(pick.lower())
+            r = row_for(os.path.basename(f)[:-6], live, f) if f else None
+        if not r:
+            print("no such # or session id"); continue
         if not r["cwd"] or not os.path.isdir(r["cwd"]):
             print(f"cwd missing: {r['cwd']}"); continue
         why = claim(r["id"])
