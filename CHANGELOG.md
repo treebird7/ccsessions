@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed (identity, tb-larr)
+- **A resume acts as the session's own agent, not the caller.** `tbe resume` (headless and interactive) and the picker used to pass the caller's environment to `claude`, so a headless resume run by birdsan did a sherlock session's invoak work as birdsan. The resumed claude now gets the identity `/hy` pinned to that session (`~/.envoak/session-identity/<id>.env`: label, key id, trust level), with every caller `ENVOAK_*` / `INVOAK_*` variable removed (identity, master password, tokens, hive session). A session with no pinned identity runs with no agent label, so invoak and envoak refuse rather than act as the wrong agent; `--as <agent>` sets one. The machine-global `current-identity.env` (last claim wins) is never used. `tbe` says which identity it used on stderr.
+
 ### Added (picker)
 - **Arrow-key picker.** In a terminal `tbe` now opens a curses list (stdlib, no dependency): ↑↓/jk/PgUp/PgDn/g/G to move, Enter to resume (same single-writer claim), `/` to search, `c` closed, `m` more, `f`/`x` toggle freeze/close in place, `q` quit. The lower pane previews the selected session — project, id, agent, start, state, folder, the search hit, and its last messages, secrets masked. `--plain` or `CCSESSIONS_PLAIN=1` keeps the numbered prompt; piped or agent runs are unchanged (print once, no prompt).
 
