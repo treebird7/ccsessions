@@ -175,9 +175,21 @@ def texts_of(d):
                             " ".join(x.get("text") or "" for x in r or [] if isinstance(x, dict))))
     return [(w, REMINDER.sub(" ", t)) for w, t in out if t]
 
+SECRET = re.compile(
+    r"(?i)(?:sk-[a-z0-9_-]{16,}|sb_(?:secret|publishable)_[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9]{20,}"
+    r"|github_pat_[a-z0-9_]{20,}|xox[abprs]-[a-z0-9-]{10,}|AKIA[A-Z0-9]{16}|eyJ[a-z0-9_-]{10,}\.[a-z0-9_.-]{10,}"
+    r"|evk1_[a-z0-9_-]{10,}|pea1_[a-z0-9_-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\b[0-9a-f]{40,}\b)")
+ASSIGN = re.compile(r"(?i)((?:key|token|secret|password|passwd|pwd)[\"']?\s*[=:]\s*[\"']?)[^\s\"',;&]{6,}")
+
+def redact(t):
+    """Mask credential shapes before a snippet leaves the process: transcripts hold tool
+    output, and `tbe search` feeds agents. ponytail: known shapes + KEY=value; extend the list."""
+    return ASSIGN.sub(r"\1‹redacted›", SECRET.sub("‹redacted›", t))
+
 def snippet(text, term, width=110):
-    """~width chars of text centred on the first hit of term, whitespace collapsed."""
-    t = " ".join(text.split())
+    """~width chars of text centred on the first hit of term, whitespace collapsed, secrets masked."""
+    t = redact(" ".join(text.split()))
     i = max(t.lower().find(term), 0)
     a = max(0, i - width // 3)
     return ("…" if a else "") + t[a:a + width] + ("…" if a + width < len(t) else "")
@@ -189,31 +201,32 @@ def search_session(paths, terms, meta=""):
     None. Score: conversation hits ×3, tool hits ×1; snippet is the newest
     conversation hit, else the newest tool hit.
     ponytail: full read per query (~0.4s warm for 700MB); index if it gets slow."""
+    terms = list(dict.fromkeys(terms))                # `foo foo` is one term
     tb = [t.encode() for t in terms]
-    lines = []
+    found, score, last = set(), 0, {}
     for p in paths:
         try:
             with open(p, "rb") as fh: blob = fh.read()
         except OSError:
             continue
-        low = blob.lower()
         meta += " " + " ".join(set(re.findall(r'"gitBranch":\s*"([^"]*)"', blob.decode("utf-8", "ignore"))))
-        if any(t in low for t in tb):
-            lines += [(p != paths[0], l) for l in blob.splitlines() if any(t in l.lower() for t in tb)]
-    meta = meta.lower()
-    found, score, snip = {t for t in terms if t in meta}, 0, {}
-    for sub, raw in lines:
-        try:
-            d = json.loads(raw)
-        except Exception:
+        if not any(t in blob.lower() for t in tb):
             continue
-        for w, text in texts_of(d):
-            low = text.lower()
-            hit = [t for t in terms if t in low]
-            if not hit: continue
-            w = 1 if sub else w                       # subagent transcripts rank as tool output
-            found.update(hit); score += w * len(hit)
-            snip[w] = snippet(text, hit[0])          # last line wins = newest
+        for raw in blob.splitlines():                 # one line at a time: a common word keeps no list
+            if not any(t in raw.lower() for t in tb): continue
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            for w, text in texts_of(d):
+                low = text.lower()
+                hit = [t for t in terms if t in low]
+                if not hit: continue
+                w = 1 if p != paths[0] else w         # subagent transcripts rank as tool output
+                found.update(hit); score += w * len(hit)
+                last[w] = (text, hit[0])              # last line wins = newest; snippet built once
+    found |= {t for t in terms if t in meta.lower()}
+    snip = {w: snippet(*v) for w, v in last.items()}
     if len(found) < len(terms):
         return None
     return score, snip.get(3) or snip.get(1) or ""
@@ -667,6 +680,12 @@ def _selftest():
         assert search_session(paths, ["flock", "artisan/x"]), "branch is searchable"
         assert search_session(paths, ["flock", "mynote"], "id mynote") , "meta (id/notes) counts"
         assert search_session(paths, ["walrus"])[0] == 1, "subagent hit ranks as tool output"
+        assert search_session(paths, ["flock", "flock"]), "duplicate words are one term"
+    for leak in ["OPENAI_API_KEY=sk-test0123456789abcdefXYZ", "token: ghp_" + "a" * 36, "sb_secret_" + "b" * 30,
+                 "password=hunter2hunter", "-----BEGIN OPENSSH PRIVATE KEY-----", "key " + "c" * 64]:
+        out = snippet("ran it: " + leak + " done", "ran")
+        assert "‹redacted›" in out and leak[-6:] not in out, f"secret masked: {leak[:12]}"
+    assert snippet("fix the flock bug", "flock") == "fix the flock bug", "plain text untouched"
     print("selftest ok"); return
 
 def main():
