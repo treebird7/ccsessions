@@ -180,12 +180,13 @@ SECRET = re.compile(
     r"|github_pat_[a-z0-9_]{20,}|xox[abprs]-[a-z0-9-]{10,}|AKIA[A-Z0-9]{16}|eyJ[a-z0-9_-]{10,}\.[a-z0-9_.-]{10,}"
     r"|evk1_[a-z0-9_-]{10,}|pea1_[a-z0-9_-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|\b[0-9a-f]{40,}\b)")
+URLCRED = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@")   # scheme://user:PASS@host
 ASSIGN = re.compile(r"(?i)((?:key|token|secret|password|passwd|pwd)[\"']?\s*[=:]\s*[\"']?)[^\s\"',;&]{6,}")
 
 def redact(t):
     """Mask credential shapes before a snippet leaves the process: transcripts hold tool
     output, and `tbe search` feeds agents. ponytail: known shapes + KEY=value; extend the list."""
-    return ASSIGN.sub(r"\1‹redacted›", SECRET.sub("‹redacted›", t))
+    return ASSIGN.sub(r"\1‹redacted›", URLCRED.sub(r"\1‹redacted›@", SECRET.sub("‹redacted›", t)))
 
 def snippet(text, term, width=110):
     """~width chars of text centred on the first hit of term, whitespace collapsed, secrets masked."""
@@ -683,10 +684,12 @@ def _selftest():
         assert search_session(paths, ["flock", "mynote"], "id mynote") , "meta (id/notes) counts"
         assert search_session(paths, ["walrus"])[0] == 1, "subagent hit ranks as tool output"
         assert search_session(paths, ["flock", "flock"]), "duplicate words are one term"
+        assert search_session(paths, ["onlyinmeta"], "id onlyinmeta"), "a word only in meta still matches"
     for leak in ["OPENAI_API_KEY=sk-test0123456789abcdefXYZ", "token: ghp_" + "a" * 36, "sb_secret_" + "b" * 30,
-                 "password=hunter2hunter", "-----BEGIN OPENSSH PRIVATE KEY-----", "key " + "c" * 64]:
+                 "password=hunter2hunter", "DATABASE_URL=postgres://app:s3cr3tpw@db.host/x", "-----BEGIN OPENSSH PRIVATE KEY-----", "key " + "c" * 64]:
         out = snippet("ran it: " + leak + " done", "ran")
-        assert "‹redacted›" in out and leak[-6:] not in out, f"secret masked: {leak[:12]}"
+        secret = "s3cr3tpw" if "postgres" in leak else leak[-6:]
+        assert "‹redacted›" in out and secret not in out, f"secret masked: {leak[:12]}"
     assert snippet("fix the flock bug", "flock") == "fix the flock bug", "plain text untouched"
     with tempfile.TemporaryDirectory() as d:     # tldr/doing reach --json too, so scan() masks them
         f = os.path.join(d, "s.jsonl")
