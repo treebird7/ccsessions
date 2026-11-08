@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed (findability, from docs/research/tbe-ux.md)
+- **Search finds closed sessions too.** A search (`/` in the picker, or at the `--plain` prompt) now shows matching closed sessions in the closed section; clearing it hides them again. A session lost because it was closed was reported as "no session matches".
+- **Pasted text matches.** Quotes and backslashes are matched in their JSON-escaped form, and the query drops terminal glyphs (`⏺ ⎿ •`) and edge punctuation; a long paste keeps its 8 longest words. `"date"` went from 1 match to 143, a `⏺`-prefixed paste from 0 to 86.
+- **Pasting several lines into `/` is safe.** The picker reads the whole paste into the query (up to 2000 chars). Before, everything after the first line reached the picker as keys, so an `x` closed a row and a newline resumed one. `--plain` drops the leftover lines.
+- **The screen says what is hidden.** Title: `39 sessions · 127 closed hidden`. The key bar shows `c closed (127)` / `c hide closed`, and drops `m more` once every session is loaded. `?` opens a key help box; any key closes it.
+- **Temp-dir sessions are hidden** (prsan's `/var/folders/.../repo` clones, 80% of all sessions, shown as a project called "repo"); `m` lands on the rows it loaded and says `+N sessions` / `no more sessions`.
+
 ### Fixed (identity, tb-larr)
 - **A resume acts as the session's own agent, not the caller.** `tbe resume` (headless and interactive) and the picker used to pass the caller's environment to `claude`, so a headless resume run by birdsan did a sherlock session's invoak work as birdsan. The resumed claude now gets the identity `/hy` pinned to that session (`~/.envoak/session-identity/<id>.env`: label, key id, trust level), with every caller `ENVOAK_*` / `INVOAK_*` variable removed (identity, master password, tokens, hive session). A session with no pinned identity runs with no agent label, so invoak and envoak refuse rather than act as the wrong agent; `--as <agent>` sets one. The machine-global `current-identity.env` (last claim wins) is never used. `tbe` says which identity it used on stderr.
 
