@@ -78,6 +78,18 @@ tbe search flock lock # ranked full-text search, never prompts (--json, -n N)
 By default it resumes with `--dangerously-skip-permissions`. If you don't want that, edit the
 last line of the script (it's ~120 lines, all in one file) and drop the flag.
 
+### Hiding folders
+
+Sessions started in or under a hidden folder aren't listed. The temp dirs
+(`/private/var/folders`, `/var/folders`, `/private/tmp`), where headless throwaway runs live,
+are always hidden. To hide more, create `~/.claude/ccsessions-settings.json`:
+
+```json
+{ "hide": ["~/dev-old"] }
+```
+
+Your list adds to the temp dirs. A frozen session is always shown.
+
 ## How it works
 
 Reads `~/.claude/projects/*/*.jsonl`, sorts by modification time, pulls `cwd` and a preview
