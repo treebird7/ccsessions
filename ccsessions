@@ -334,6 +334,14 @@ def find_file(sid):
          glob.glob(os.path.join(PROJECTS, "*", f"*{sid}*.jsonl")))
     return max(g, key=os.path.getmtime) if g else None
 
+TMP_DIRS = ("-private-var-folders-", "-var-folders-", "-private-tmp-", "-tmp-")
+
+def is_tmp(f):
+    """Session run in a temp dir — prsan/headless throwaways (cwd .../T/prsan-XXX/repo).
+    They were ~80% of all sessions and showed up as a project called "repo".
+    ponytail: hidden everywhere, freeze one to keep it; add a flag if anyone wants them back."""
+    return os.path.basename(os.path.dirname(f)).startswith(TMP_DIRS)
+
 def row_for(sid, live, f=None):
     """Build a row for a session id (may be older than the scan window)."""
     f = f or find_file(sid)
@@ -720,7 +728,7 @@ def wrap(text, width, lines):
     if len(text) > width * lines and out: out[-1] = out[-1][:-1] + "…"
     return out
 
-def run_picker(items, ago, frozen, closed, filt, show_closed, at_id=None):
+def run_picker(items, ago, frozen, closed, filt, show_closed, at_id=None, note=""):
     """Arrow-key picker (stdlib curses). Returns (action, payload): ("resume", row),
     ("search", words), ("closed", None), ("more", None), ("mark", (path, row)), ("quit", None)."""
     import curses
@@ -732,7 +740,8 @@ def run_picker(items, ago, frozen, closed, filt, show_closed, at_id=None):
         h, w = scr.getmaxyx()
         prev_h = max(min(14, h // 2), 6)
         list_h = h - prev_h - 2
-        title = f" tbe  {len(sel)} sessions" + (f"   /{filt}" if filt else "") + ("   +closed" if show_closed else "")
+        title = f" tbe  {len(sel)} sessions" + (f"   /{filt}" if filt else "") + ("   +closed" if show_closed else "") \
+                + (f"   ({note})" if note else "")
         scr.addnstr(0, 0, title.ljust(w), w - 1, curses.A_REVERSE)
         for y, (k, v) in enumerate(items[top:top + list_h], 1):
             i = top + y - 1
@@ -829,6 +838,8 @@ def _selftest():
     assert agent_of("no-such-session-id") == "", "agent fallback"
     assert agent_width([{"agent": "sherlock-m5"}, {"agent": ""}]) == 11, "agent column width"
     assert agent_width([{"agent": ""}]) == 0, "agent column hidden when unused"
+    assert is_tmp("/p/-private-var-folders-3x-T-prsan-ab-repo/x.jsonl"), "temp session hidden"
+    assert not is_tmp("/p/-Users-me-Dev-tmp-tool/x.jsonl"), "real project with tmp in name kept"
     # last_paragraph: conclusion wins, trailing code fence skipped, plain text intact
     msg = "Idea good, half exists.\n\nMiddle detail.\n\nWant me build it? Piece 2+3 in repo."
     assert last_paragraph(msg) == "Want me build it? Piece 2+3 in repo.", "last paragraph"
@@ -995,17 +1006,21 @@ def main():
     def take(k):
         """Scan the next k matching sessions into rows. Closed sessions are
         skipped here — they live in the (c) section (frozen outranks closed)."""
+        if k <= 0:
+            return
         for f in fiter:
-            if k <= 0:
-                return
             sid = os.path.basename(f)[:-6]
             if sid in closed and sid not in frozen:
+                continue
+            if is_tmp(f) and sid not in frozen:
                 continue
             h = hit(sid, f)
             if h is None:
                 continue
             rows.append({**row_for(sid, live, f), **h})
             k -= 1
+            if k <= 0:
+                return                    # stop before pulling the next file: it'd be lost
 
     take(limit)
 
@@ -1060,7 +1075,7 @@ def main():
     if not rows and not frozen and not closed:     # all-closed still opens: `c` shows them
         print("No sessions found."); return
 
-    show_closed = False
+    show_closed, note = False, ""
     use_picker = (sys.stdin.isatty() and sys.stdout.isatty() and "--plain" not in sys.argv[1:]
                   and not os.environ.get("CCSESSIONS_PLAIN") and os.environ.get("TERM") != "dumb")
     at_id = None
@@ -1072,11 +1087,15 @@ def main():
             items = picker_items(pinned_ids, body_rows, cbody, grouped)
             save_json(LAST, [{"n": i, "id": r["id"], "proj": r["proj"], "cwd": r["cwd"]}
                              for i, r in enumerate((v for k, v in items if k == "r"), 1)])
-            act, arg = run_picker(items, ago, frozen, closed, filt, show_closed, at_id)
+            act, arg = run_picker(items, ago, frozen, closed, filt, show_closed, at_id, note)
+            note = ""
             if act == "quit":
                 return
-            if act == "more":
-                take(100); continue
+            if act == "more":             # land on the first new row: grouped, they hide inside old groups
+                n = len(rows); take(100)
+                at_id = rows[n]["id"] if len(rows) > n else at_id
+                note = f"+{len(rows) - n} sessions" if len(rows) > n else "no more sessions"
+                continue
             if act == "closed":
                 show_closed = not show_closed; continue
             if act == "search":
