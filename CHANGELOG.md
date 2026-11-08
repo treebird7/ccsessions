@@ -7,6 +7,7 @@
 - **Pasted text matches.** Quotes and backslashes are matched in their JSON-escaped form, and the query drops terminal glyphs (`⏺ ⎿ •`) and edge punctuation; a long paste keeps its 8 longest words. `"date"` went from 1 match to 143, a `⏺`-prefixed paste from 0 to 86.
 - **Pasting several lines into `/` is safe.** The picker reads the whole paste into the query (up to 2000 chars). Before, everything after the first line reached the picker as keys, so an `x` closed a row and a newline resumed one. `--plain` drops the leftover lines.
 - **The screen says what is hidden.** Title: `39 sessions · 127 closed hidden`. The key bar shows `c closed (127)` / `c hide closed`, and drops `m more` once every session is loaded. `?` opens a key help box; any key closes it.
+- **Hidden folders are a setting**: `~/.claude/ccsessions-settings.json` takes `{"hide": ["/private/tmp", "~/dev-old", …]}`. Sessions started in or under those folders aren't listed (freeze one to keep it). Without the file, the temp dirs are hidden.
 - **Temp-dir sessions are hidden** (prsan's `/var/folders/.../repo` clones, 80% of all sessions, shown as a project called "repo"); `m` lands on the rows it loaded and says `+N sessions` / `no more sessions`.
 
 ### Fixed (identity, tb-larr)

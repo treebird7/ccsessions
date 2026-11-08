@@ -347,14 +347,27 @@ def find_file(sid):
          glob.glob(os.path.join(PROJECTS, "*", f"*{sid}*.jsonl")))
     return max(g, key=os.path.getmtime) if g else None
 
-# macOS cwds are real paths (/tmp → /private/tmp), so no bare "-tmp-": it'd also match a real /tmp-foo
-TMP_DIRS = ("-private-var-folders-", "-var-folders-", "-private-tmp-")
+# {"hide": [folder, …]}: sessions started in or under these folders aren't listed. The default is
+# the temp dirs, where prsan/headless throwaways run (~80% of all sessions, shown as a project "repo").
+# macOS cwds are real paths (/tmp → /private/tmp), so /tmp itself isn't needed.
+SETTINGS = os.path.expanduser("~/.claude/ccsessions-settings.json")
+HIDE = ["/private/var/folders", "/var/folders", "/private/tmp"]
 
-def is_tmp(f):
-    """Session run in a temp dir — prsan/headless throwaways (cwd .../T/prsan-XXX/repo).
-    They were ~80% of all sessions and showed up as a project called "repo".
-    ponytail: hidden everywhere, freeze one to keep it; add a flag if anyone wants them back."""
-    return os.path.basename(os.path.dirname(f)).startswith(TMP_DIRS)
+def enc(path):
+    """A folder as Claude Code names its project dir: every non-alphanumeric char → '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", os.path.expanduser(path).rstrip("/"))
+
+def hidden_dirs(settings=None):
+    hide = load_json(settings or SETTINGS, {}).get("hide", HIDE)
+    return tuple(enc(p) for p in hide)
+
+_HIDE = hidden_dirs()
+
+def is_tmp(f, hide=None):
+    """Session started in a hidden folder (see SETTINGS). Freeze one to keep it listed.
+    ponytail: the encoding is lossy, so hiding /a/b-c also hides /a/b/c and /a/b-c-d."""
+    d = os.path.basename(os.path.dirname(f))
+    return any(d == h or d.startswith(h + "-") for h in (hide if hide is not None else _HIDE))
 
 def row_for(sid, live, f=None):
     """Build a row for a session id (may be older than the scan window)."""
@@ -896,6 +909,9 @@ def _selftest():
     assert is_tmp("/p/-private-var-folders-3x-T-prsan-ab-repo/x.jsonl"), "temp session hidden"
     assert not is_tmp("/p/-Users-me-Dev-tmp-tool/x.jsonl"), "real project with tmp in name kept"
     assert not is_tmp("/p/-tmp-foo/x.jsonl"), "/tmp-foo is a real dir, not a temp one"
+    assert is_tmp("/p/-Users-me-Dev-old-x/a.jsonl", (enc("/Users/me/Dev-old"),)), "settings folder hidden"
+    assert not is_tmp("/p/-Users-me-Dev-x/a.jsonl", (enc("/Users/me/Dev-old"),)), "others kept"
+    assert hidden_dirs("/nonexistent.json") == tuple(enc(p) for p in HIDE), "no file → temp-dir default"
     assert query_terms("⏺ All 8 copied — to a *permanent* home:") == ["all", "8", "copied", "to", "a", "permanent", "home"], "paste cleaned"
     assert query_terms("⏺copied →home…") == ["copied", "home"], "glyph stuck to a word"
     assert query_terms("a bb ccc dddd eeeee ffffff ggggggg hhhhhhhh iiiiiiiii", keep=3) == ["ggggggg", "hhhhhhhh", "iiiiiiiii"], "long paste keeps longest"
