@@ -347,8 +347,8 @@ def find_file(sid):
          glob.glob(os.path.join(PROJECTS, "*", f"*{sid}*.jsonl")))
     return max(g, key=os.path.getmtime) if g else None
 
-# {"hide": [folder, …]}: sessions started in or under these folders aren't listed. The default is
-# the temp dirs, where prsan/headless throwaways run (~80% of all sessions, shown as a project "repo").
+# {"hide": [folder, …]}: sessions started in or under these folders aren't listed, on top of
+# the temp dirs (always hidden), where prsan/headless throwaways run (~80% of all sessions, shown as a project "repo").
 # macOS cwds are real paths (/tmp → /private/tmp), so /tmp itself isn't needed.
 SETTINGS = os.path.expanduser("~/.claude/ccsessions-settings.json")
 HIDE = ["/private/var/folders", "/var/folders", "/private/tmp"]
@@ -358,8 +358,8 @@ def enc(path):
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.expanduser(path).rstrip("/"))
 
 def hidden_dirs(settings=None):
-    hide = load_json(settings or SETTINGS, {}).get("hide", HIDE)
-    return tuple(enc(p) for p in hide)
+    hide = HIDE + load_json(settings or SETTINGS, {}).get("hide", [])   # adds, never replaces
+    return tuple(dict.fromkeys(enc(p) for p in hide))
 
 _HIDE = hidden_dirs()
 
@@ -911,7 +911,12 @@ def _selftest():
     assert not is_tmp("/p/-tmp-foo/x.jsonl"), "/tmp-foo is a real dir, not a temp one"
     assert is_tmp("/p/-Users-me-Dev-old-x/a.jsonl", (enc("/Users/me/Dev-old"),)), "settings folder hidden"
     assert not is_tmp("/p/-Users-me-Dev-x/a.jsonl", (enc("/Users/me/Dev-old"),)), "others kept"
-    assert hidden_dirs("/nonexistent.json") == tuple(enc(p) for p in HIDE), "no file → temp-dir default"
+    assert hidden_dirs("/nonexistent.json") == tuple(enc(p) for p in HIDE), "no file → temp dirs"
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as t:
+        json.dump({"hide": ["/x/old"]}, t)
+    assert hidden_dirs(t.name) == tuple(enc(p) for p in HIDE + ["/x/old"]), "user list adds to temp dirs"
+    os.unlink(t.name)
     assert query_terms("⏺ All 8 copied — to a *permanent* home:") == ["all", "8", "copied", "to", "a", "permanent", "home"], "paste cleaned"
     assert query_terms("⏺copied →home…") == ["copied", "home"], "glyph stuck to a word"
     assert query_terms("a bb ccc dddd eeeee ffffff ggggggg hhhhhhhh iiiiiiiii", keep=3) == ["ggggggg", "hhhhhhhh", "iiiiiiiii"], "long paste keeps longest"
