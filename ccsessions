@@ -334,7 +334,8 @@ def find_file(sid):
          glob.glob(os.path.join(PROJECTS, "*", f"*{sid}*.jsonl")))
     return max(g, key=os.path.getmtime) if g else None
 
-TMP_DIRS = ("-private-var-folders-", "-var-folders-", "-private-tmp-", "-tmp-")
+# macOS cwds are real paths (/tmp → /private/tmp), so no bare "-tmp-": it'd also match a real /tmp-foo
+TMP_DIRS = ("-private-var-folders-", "-var-folders-", "-private-tmp-")
 
 def is_tmp(f):
     """Session run in a temp dir — prsan/headless throwaways (cwd .../T/prsan-XXX/repo).
@@ -840,6 +841,7 @@ def _selftest():
     assert agent_width([{"agent": ""}]) == 0, "agent column hidden when unused"
     assert is_tmp("/p/-private-var-folders-3x-T-prsan-ab-repo/x.jsonl"), "temp session hidden"
     assert not is_tmp("/p/-Users-me-Dev-tmp-tool/x.jsonl"), "real project with tmp in name kept"
+    assert not is_tmp("/p/-tmp-foo/x.jsonl"), "/tmp-foo is a real dir, not a temp one"
     # last_paragraph: conclusion wins, trailing code fence skipped, plain text intact
     msg = "Idea good, half exists.\n\nMiddle detail.\n\nWant me build it? Piece 2+3 in repo."
     assert last_paragraph(msg) == "Want me build it? Piece 2+3 in repo.", "last paragraph"
@@ -1036,7 +1038,7 @@ def main():
         ended) wins over the transcript tail when present."""
         out = []
         for sid, mark in closed.items():
-            if sid in frozen:
+            if sid in frozen or (sid in by_id and is_tmp(by_id[sid])):
                 continue
             r = marked_row(sid)
             if r:

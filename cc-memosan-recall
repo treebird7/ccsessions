@@ -25,7 +25,12 @@ _SHARED = os.path.expanduser('~/.memosan/proactive-inbox.md')
 # the sidecar the row goes dark the instant the suggestion is delivered, which
 # is exactly when it is worth showing.
 _CANDIDATES = [p for p in (_MINE, f'{_MINE}.delivered' if _MINE else '', _SHARED) if p]
-INBOX = next((p for p in _CANDIDATES if os.path.exists(p) and os.path.getsize(p) > 0), _SHARED)
+def _nonempty(p):
+    try:                                    # the delivery hook can move it between calls
+        return os.path.getsize(p) > 0
+    except OSError:
+        return False
+INBOX = next((p for p in _CANDIDATES if _nonempty(p)), _SHARED)
 # what scripts/proactive-scorer.ts writes: "- **<title>** (0.66, memosan #12) — <snippet>"
 ENTRY = re.compile(r'^- \*\*(?P<title>.+?)\*\* \((?P<score>[0-9.]+)')
 MAX_TITLE = 40
