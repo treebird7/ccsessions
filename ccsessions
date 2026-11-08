@@ -246,7 +246,7 @@ def query_terms(q, keep=8):
     """Words worth matching in a typed or pasted query: lower-cased, edge punctuation and
     terminal glyphs (⏺ ⎿ • →) dropped, duplicates removed. A long paste keeps its `keep`
     longest words — they carry the signal, and every term must match (AND)."""
-    ts = [t.strip("\"'`.,;:!?()[]{}<>*_~#|-—–…") for t in q.lower().split()]
+    ts = [re.sub(r"^\W+|\W+$", "", t) for t in q.lower().split()]   # any edge punctuation/glyph, ⏺copied too
     ts = list(dict.fromkeys(t for t in ts if any(c.isalnum() for c in t)))
     if len(ts) > keep:
         longest = set(sorted(ts, key=len, reverse=True)[:keep])
@@ -837,8 +837,8 @@ def run_picker(items, ago, frozen, closed, filt, show_closed, at_id=None, note="
         # query — left in the buffer, it would reach the picker as keys (x closes, ⏎ resumes).
         scr.nodelay(True)
         rest = bytearray()
-        while (c := scr.getch()) != -1:
-            if 0 <= c < 256: rest.append(c)
+        while (c := scr.getch()) != -1:                 # read it all, keep up to the cap
+            if 0 <= c < 256 and len(got) + len(rest) < 2000: rest.append(c)
         scr.nodelay(False)
         return (got + b" " + bytes(rest)).decode("utf-8", "ignore").replace("\n", " ").replace("\r", " ")
 
@@ -897,6 +897,7 @@ def _selftest():
     assert not is_tmp("/p/-Users-me-Dev-tmp-tool/x.jsonl"), "real project with tmp in name kept"
     assert not is_tmp("/p/-tmp-foo/x.jsonl"), "/tmp-foo is a real dir, not a temp one"
     assert query_terms("⏺ All 8 copied — to a *permanent* home:") == ["all", "8", "copied", "to", "a", "permanent", "home"], "paste cleaned"
+    assert query_terms("⏺copied →home…") == ["copied", "home"], "glyph stuck to a word"
     assert query_terms("a bb ccc dddd eeeee ffffff ggggggg hhhhhhhh iiiiiiiii", keep=3) == ["ggggggg", "hhhhhhhh", "iiiiiiiii"], "long paste keeps longest"
     assert key_bar(False, 0, False) == "↑↓ move  ⏎ resume  / search  f freeze  x close  ? help  q quit", "bar drops dead keys"
     assert "c closed (5)" in key_bar(False, 5, True) and "m more" in key_bar(False, 5, True), "bar shows hidden count"
